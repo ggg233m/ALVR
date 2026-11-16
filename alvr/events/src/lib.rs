@@ -139,6 +139,19 @@ impl Event {
     }
 }
 
+/// Log target used only by telemetry events.
+///
+/// `send_event` historically routed everything through `info!`, which meant a
+/// GraphStatistics event was serialised to JSON, parsed back by the logging backend,
+/// re-formatted into a line with an empty message ("04:00:47.256 [GRAPH] ") and written to
+/// disk 72 times a second, discarding all 14 fields in the process. fern flushes on every
+/// record, so each of those was a synchronous write; on a mechanical disk ETW measured
+/// 77.8 ms inside one of them, which held up Present() and starved the headset.
+///
+/// Telemetry only feeds the dashboard graphs, which receive it over the event broadcast, so
+/// the file sink now filters this target out while the broadcast still happens.
+pub const TELEMETRY_TARGET: &str = "alvr::telemetry";
+
 pub fn send_event(event_type: EventType) {
-    info!("{}", serde_json::to_string(&event_type).unwrap());
+    info!(target: TELEMETRY_TARGET, "{}", serde_json::to_string(&event_type).unwrap());
 }
