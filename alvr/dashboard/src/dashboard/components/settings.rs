@@ -4,7 +4,7 @@ use super::{
 };
 use crate::dashboard::ServerRequest;
 use alvr_gui_common::{DisplayString, theme};
-use alvr_session::{SessionSettings, Settings};
+use alvr_session::{SessionConfig, Settings, SteamvrHmdInitConfig};
 use eframe::egui::{Align, Frame, Grid, Layout, RichText, ScrollArea, Ui};
 #[cfg(target_arch = "wasm32")]
 use instant::Instant;
@@ -35,6 +35,11 @@ pub struct SettingsTab {
     eye_face_tracking_preset: PresetControl,
     top_level_entries: Vec<TopLevelEntry>,
     session_settings_json: Option<json::Value>,
+    /// Latest settings, used by the derived-resolution readout.
+    current_settings: Option<Settings>,
+    /// Resolution the server actually negotiated last time it connected a client. Used to
+    /// fill in heights the user left unpinned.
+    negotiated_resolution: Option<SteamvrHmdInitConfig>,
     last_update_instant: Instant,
 }
 
@@ -82,11 +87,23 @@ impl SettingsTab {
             eye_face_tracking_preset: PresetControl::new(builtin_schema::eye_face_tracking_schema()),
             top_level_entries,
             session_settings_json: None,
+            current_settings: None,
+            negotiated_resolution: None,
             last_update_instant: Instant::now(),
         }
     }
 
-    pub fn update_session(&mut self, session_settings: &SessionSettings) {
+    pub fn update_session(&mut self, session: &SessionConfig, settings: &Settings) {
+        let session_settings = &session.session_settings;
+        // The server resolves any unpinned heights during negotiation and stores the
+        // result here; the readout uses it so it can show real numbers instead of a
+        // placeholder.
+        self.negotiated_resolution = Some(session.steamvr_hmd_init_config.clone());
+        // Snapshot the concrete settings so the derived-resolution readout can be
+        // recomputed while a slider is being dragged, without waiting for the server to
+        // echo the change back.
+        self.current_settings = Some(settings.clone());
+
         let settings_json = json::to_value(session_settings).unwrap();
 
         self.resolution_preset
@@ -131,7 +148,7 @@ impl SettingsTab {
                         ui.selectable_value(
                             &mut self.selected_top_tab_id,
                             "presets".into(),
-                            RichText::new("Presets").raised().size(15.0),
+                            RichText::new("预设").raised().size(15.0),
                         );
                         for entry in &mut self.top_level_entries {
                             ui.selectable_value(
@@ -155,6 +172,17 @@ impl SettingsTab {
                         .show(ui, |ui| {
                             path_value_pairs.extend(self.resolution_preset.ui(ui));
                             ui.end_row();
+
+                            // Derived resolution breakdown, directly under the resolution
+                            // preset so the numbers it produces are visible without
+                            // opening the Video tab.
+                            if let Some(settings) = &self.current_settings {
+                                super::resolution_readout::ui(
+                                    ui,
+                                    settings,
+                                    self.negotiated_resolution.as_ref(),
+                                );
+                            }
 
                             path_value_pairs.extend(self.framerate_preset.ui(ui));
                             ui.end_row();

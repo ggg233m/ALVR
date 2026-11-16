@@ -50,7 +50,31 @@ pub mod graph_colors {
     pub const RECORDED_BITRATE: Color32 = super::FG;
 }
 
+/// Install a CJK font as a fallback so the Chinese UI renders correctly.
+/// egui's built-in fonts only cover latin/cyrillic; characters not found there
+/// fall through to this font. Bundled as a subset to keep the binary small.
+fn install_cjk_font(ctx: &Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+
+    ctx.add_font(FontInsert::new(
+        "ALVR-CJK",
+        egui::FontData::from_static(include_bytes!("../resources/cjk.ttf")),
+        vec![
+            InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: FontPriority::Lowest,
+            },
+            InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            },
+        ],
+    ));
+}
+
 pub fn set_theme(ctx: &Context) {
+    install_cjk_font(ctx);
+
     ctx.set_theme(ThemePreference::Dark);
 
     let mut style = (*ctx.global_style()).clone();

@@ -193,7 +193,7 @@ impl DataSources {
                         let message = version_data
                             .get("body")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("Error parsing release body");
+                            .unwrap_or("解析发布说明失败");
 
                         report_event_local(
                             &context,
@@ -225,7 +225,7 @@ impl DataSources {
                 while running.value() {
                     while let Ok(request) = requests_receiver.try_recv() {
                         debug!(
-                            "Dashboard request: {}",
+                            "仪表盘请求：{}",
                             serde_json::to_string(&request).unwrap()
                         );
 
@@ -242,7 +242,7 @@ impl DataSources {
                                 }
                                 ServerRequest::SetSessionValues(values) => {
                                     if let Err(e) = session_manager.set_session_values(values) {
-                                        error!("Failed to set session value: {e}")
+                                        error!("设置会话值失败：{e}")
                                     }
 
                                     report_session_local(&context, &events_sender, session_manager);
@@ -257,9 +257,9 @@ impl DataSources {
                                         FirewallRulesAction::Add,
                                         &filesystem_layout,
                                     ) {
-                                        error!("Failed to add firewall rules! code: {e}");
+                                        error!("添加防火墙规则失败！代码：{e}");
                                     } else {
-                                        info!("Successfully added firewall rules!");
+                                        info!("已成功添加防火墙规则！");
                                     }
                                 }
                                 ServerRequest::RemoveFirewallRules => {
@@ -267,9 +267,9 @@ impl DataSources {
                                         FirewallRulesAction::Remove,
                                         &filesystem_layout,
                                     ) {
-                                        error!("Failed to remove firewall rules! code: {e}");
+                                        error!("移除防火墙规则失败！代码：{e}");
                                     } else {
-                                        info!("Successfully removed firewall rules!");
+                                        info!("已成功移除防火墙规则！");
                                     }
                                 }
                                 ServerRequest::RegisterAlvrDriver => {
@@ -312,11 +312,11 @@ impl DataSources {
                                 | ServerRequest::StartRecording
                                 | ServerRequest::StopRecording => {
                                     warn!(
-                                        "Cannot perform action, streamer (SteamVR) is not connected."
+                                        "无法执行操作，串流端（SteamVR）未连接。"
                                     )
                                 }
                                 ServerRequest::RestartSteamvr | ServerRequest::ShutdownSteamvr => {
-                                    warn!("Streamer not launched, can't signal SteamVR shutdown")
+                                    warn!("串流端未启动，无法通知 SteamVR 关闭")
                                 }
                             }
                         } else {
@@ -421,7 +421,7 @@ impl DataSources {
                     while running.value() {
                         match ws.read() {
                             Ok(tungstenite::Message::Text(json_string)) => {
-                                debug!("Server event: {json_string}");
+                                debug!("服务器事件：{json_string}");
                                 if let Ok(event) = serde_json::from_str(&json_string) {
                                     events_sender
                                         .send(PolledEvent {
@@ -482,7 +482,7 @@ impl DataSources {
 
                         if !matches {
                             error!(
-                                "Server version mismatch: found {version}. Please remove all previous ALVR installations"
+                                "服务器版本不匹配：检测到 {version}。请卸载此前所有的 ALVR 安装版本"
                             );
                         }
 
@@ -494,12 +494,12 @@ impl DataSources {
                     {
                         let mut session_source_lock = session_source.lock();
                         if connected && matches!(*session_source_lock, SessionSource::Local(_)) {
-                            info!("Server connected");
+                            info!("服务器已连接");
                             *session_source_lock = SessionSource::Remote;
                         } else if !connected
                             && matches!(*session_source_lock, SessionSource::Remote)
                         {
-                            info!("Server disconnected");
+                            info!("服务器已断开");
                             *session_source_lock =
                                 SessionSource::Local(Box::new(get_local_session_source()));
                         }

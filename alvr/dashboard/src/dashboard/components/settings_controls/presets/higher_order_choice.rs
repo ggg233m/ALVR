@@ -40,7 +40,8 @@ impl Control {
             .collect();
 
         let mut strings = schema.strings;
-        strings.insert("display_name".into(), schema.name.clone());
+        // Keep the schema name as the logic key, but render a localized label.
+        strings.insert("display_name".into(), alvr_gui_common::tr(&schema.name));
 
         let control_schema = SchemaNode::Section {
             entries: vec![SchemaEntry {
@@ -60,9 +61,12 @@ impl Control {
                         .into_iter()
                         .map(|option| SchemaEntry {
                             name: option.display_name.clone(),
-                            strings: [("display_name".into(), option.display_name)]
-                                .into_iter()
-                                .collect(),
+                            strings: [(
+                                "display_name".into(),
+                                alvr_gui_common::tr(&option.display_name),
+                            )]
+                            .into_iter()
+                            .collect(),
                             flags: HashSet::new(),
                             content: None,
                         })

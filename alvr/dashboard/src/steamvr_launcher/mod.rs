@@ -53,7 +53,7 @@ pub fn maybe_kill_steamvr() {
 
     #[allow(unused_variables)]
     for process in system.processes_by_name(OsStr::new(&afs::exec_fname("vrmonitor"))) {
-        debug!("Killing vrmonitor");
+        debug!("正在结束 vrmonitor");
 
         #[cfg(target_os = "linux")]
         linux_steamvr::terminate_process(process);
@@ -67,7 +67,7 @@ pub fn maybe_kill_steamvr() {
 
     #[allow(unused_variables)]
     for process in system.processes_by_name(OsStr::new(&afs::exec_fname("vrserver"))) {
-        debug!("Killing vrserver");
+        debug!("正在结束 vrserver");
 
         #[cfg(target_os = "linux")]
         linux_steamvr::terminate_process(process);
@@ -84,11 +84,11 @@ fn unblock_alvr_driver() -> Result<()> {
     }
 
     let path = alvr_server_io::steamvr_settings_file_path()?;
-    let text = fs::read_to_string(&path).with_context(|| format!("Failed to read {path:?}"))?;
+    let text = fs::read_to_string(&path).with_context(|| format!("读取 {path:?} 失败"))?;
     let new_text = unblock_alvr_driver_within_vrsettings(text.as_str())
-        .with_context(|| "Failed to rewrite .vrsettings.")?;
+        .with_context(|| "重写 .vrsettings 失败。")?;
     fs::write(&path, new_text)
-        .with_context(|| "Failed to write .vrsettings back after changing it.")?;
+        .with_context(|| "修改后写回 .vrsettings 失败。")?;
     Ok(())
 }
 
@@ -98,7 +98,7 @@ fn unblock_alvr_driver_within_vrsettings(text: &str) -> Result<String> {
     let mut settings = serde_json::from_str::<serde_json::Value>(text)?;
     let values = settings
         .as_object_mut()
-        .with_context(|| "Failed to parse .vrsettings.")?;
+        .with_context(|| "解析 .vrsettings 失败。")?;
     let blocked = values
         .get(DRIVER_KEY)
         .and_then(|driver| driver.get(BLOCKED_KEY))
@@ -106,16 +106,16 @@ fn unblock_alvr_driver_within_vrsettings(text: &str) -> Result<String> {
         .unwrap_or(false);
 
     if blocked {
-        debug!("Unblocking ALVR driver in SteamVR.");
+        debug!("正在解除 SteamVR 中对 ALVR 驱动的阻止。");
         if !values.contains_key(DRIVER_KEY) {
             values.insert(DRIVER_KEY.into(), json!({}));
         }
         let driver = settings[DRIVER_KEY]
             .as_object_mut()
-            .with_context(|| "Did not find ALVR key in settings.")?;
+            .with_context(|| "在设置中未找到 ALVR 键。")?;
         driver.insert(BLOCKED_KEY.into(), json!(false)); // overwrites if present
     } else {
-        debug!("ALVR is not blocked in SteamVR.");
+        debug!("ALVR 未在 SteamVR 中被阻止。");
     }
 
     Ok(serde_json::to_string_pretty(&settings)?)
@@ -152,7 +152,7 @@ impl Launcher {
         alvr_server_io::driver_registration(&[alvr_driver_dir], true).ok();
 
         if let Err(err) = unblock_alvr_driver() {
-            warn!("Failed to unblock ALVR driver: {:?}", err);
+            warn!("解除 ALVR 驱动阻止失败：{:?}", err);
         }
 
         #[cfg(target_os = "linux")]
@@ -168,7 +168,7 @@ impl Launcher {
             return;
         }
 
-        debug!("SteamVR is dead. Launching...");
+        debug!("SteamVR 未运行，正在启动……");
 
         if data_sources::get_read_only_local_session()
             .settings()
@@ -179,10 +179,10 @@ impl Launcher {
             let start_script = afs::filesystem_layout_invalid().server_start_script();
 
             if start_script.exists() {
-                debug!("Running VR server start script: {}", start_script.display());
+                debug!("正在运行 VR 服务器启动脚本：{}", start_script.display());
 
                 if let Err(e) = spawn_and_reap(&mut Command::new(&start_script)) {
-                    error!("Failed to run VR server start script: {e}");
+                    error!("运行 VR 服务器启动脚本失败：{e}");
                 }
             } else if let Ok(steamvr_bin_dir) =
                 alvr_server_io::steamvr_root_dir().map(|root| root.join("bin"))
@@ -193,16 +193,16 @@ impl Launcher {
                     steamvr_bin_dir.join("vrmonitor.sh")
                 };
 
-                debug!("Launching SteamVR from path: {}", steamvr_path.display());
+                debug!("正在从以下路径启动 SteamVR：{}", steamvr_path.display());
 
                 if let Err(e) = spawn_and_reap(&mut Command::new(&steamvr_path)) {
                     error!(
-                        "Failed to run SteamVR from automatically detected path {} with error: {e}",
+                        "从自动检测到的路径 {} 启动 SteamVR 失败，错误：{e}",
                         steamvr_path.display()
                     );
                 }
             } else {
-                error!("Failed to find SteamVR files to directly launch SteamVR");
+                error!("未找到用于直接启动 SteamVR 的 SteamVR 文件");
             }
         } else {
             #[cfg(windows)]
@@ -214,7 +214,7 @@ impl Launcher {
     }
 
     pub fn ensure_steamvr_shutdown(&self) {
-        debug!("Waiting for SteamVR to shutdown...");
+        debug!("正在等待 SteamVR 关闭……");
         let start_time = Instant::now();
         while start_time.elapsed() < SHUTDOWN_TIMEOUT && is_steamvr_running() {
             thread::sleep(Duration::from_millis(500));

@@ -21,9 +21,9 @@ impl Control {
         schema_content: SchemaNode,
     ) -> Self {
         let default_string = if default_enabled {
-            "ON".into()
+            "开".into()
         } else {
-            "OFF".into()
+            "关".into()
         };
 
         let control = {

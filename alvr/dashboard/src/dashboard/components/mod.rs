@@ -4,6 +4,7 @@ mod devices;
 mod logs;
 mod new_version_popup;
 mod notifications;
+mod resolution_readout;
 mod settings;
 mod settings_controls;
 mod setup_wizard;

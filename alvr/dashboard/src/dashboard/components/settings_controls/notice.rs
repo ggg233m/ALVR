@@ -5,6 +5,7 @@ use eframe::{
 };
 
 pub fn notice(ui: &mut Ui, text: &str) {
+    let text = alvr_gui_common::tr(text);
     Frame::group(ui.style())
         .fill(log_colors::WARNING_LIGHT)
         .corner_radius(theme::CORNER_RADIUS)

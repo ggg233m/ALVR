@@ -9,7 +9,7 @@ use sysinfo::Process;
 pub fn launch_steamvr_with_steam() {
     if let Err(e) = super::spawn_and_reap(Command::new("steam").args(["steam://rungameid/250820"]))
     {
-        error!("Failed to launch SteamVR through Steam: {e}");
+        error!("通过 Steam 启动 SteamVR 失败：{e}");
     }
 }
 
@@ -23,14 +23,14 @@ pub fn maybe_wrap_vrcompositor_launcher() -> alvr_common::anyhow::Result<()> {
         .join("linux64");
     let steamvr_vrserver_path = steamvr_bin_dir.join("vrserver");
     debug!(
-        "File path used to check for linux files: {}",
+        "用于检查 Linux 文件的路径：{}",
         steamvr_vrserver_path.display()
     );
     match steamvr_vrserver_path.try_exists() {
         Ok(exists) => {
             if !exists {
                 bail!(
-                    "SteamVR Linux files missing, aborting startup, please re-check compatibility tools for SteamVR, verify integrity of files for SteamVR and make sure you're not using Flatpak Steam with non-Flatpak ALVR."
+                    "缺少 SteamVR Linux 文件，已中止启动。请重新检查 SteamVR 的兼容工具、验证 SteamVR 文件完整性，并确认没有把 Flatpak Steam 与非 Flatpak 的 ALVR 混用。"
                 );
             }
         }
@@ -105,20 +105,20 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                 device_type: wgpu::DeviceType::IntegratedGpu,
             }
     });
-    debug!("have_intel_igpu: {}", have_intel_igpu);
+    debug!("是否存在 Intel 核显：{}", have_intel_igpu);
     let have_amd_igpu = device_infos.iter().any(|gpu| {
         gpu.1
             == DeviceInfo::Amd {
                 device_type: wgpu::DeviceType::IntegratedGpu,
             }
     });
-    debug!("have_amd_igpu: {}", have_amd_igpu);
+    debug!("是否存在 AMD 核显：{}", have_amd_igpu);
 
     let have_igpu = have_intel_igpu || have_amd_igpu;
-    debug!("have_igpu: {}", have_igpu);
+    debug!("是否存在核显：{}", have_igpu);
 
     let have_nvidia_dgpu = device_infos.iter().any(|gpu| gpu.1 == DeviceInfo::Nvidia);
-    debug!("have_nvidia_dgpu: {}", have_nvidia_dgpu);
+    debug!("是否存在 NVIDIA 独显：{}", have_nvidia_dgpu);
 
     let have_amd_dgpu = device_infos.iter().any(|gpu| {
         gpu.1
@@ -126,11 +126,11 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                 device_type: wgpu::DeviceType::DiscreteGpu,
             }
     });
-    debug!("have_amd_dgpu: {}", have_amd_dgpu);
+    debug!("是否存在 AMD 独显：{}", have_amd_dgpu);
 
     if have_amd_igpu || have_amd_dgpu {
         let is_any_amd_driver_invalid = device_infos.iter().any(|gpu| {
-            info!("Driver name: {}", gpu.0.get_info().driver);
+            info!("驱动名称：{}", gpu.0.get_info().driver);
             match gpu.0.get_info().driver.as_str() {
                 "AMD proprietary driver" | "AMD open-source driver" => true, // AMDGPU-Pro | AMDVLK
                 _ => false,
@@ -138,9 +138,9 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
         });
         if is_any_amd_driver_invalid {
             error!(
-                "Amdvlk or amdgpu-pro vulkan drivers detected, SteamVR may not function properly. \
-            Please remove them or make them unavailable for SteamVR and games you're trying to launch.\n\
-            For more detailed info visit the wiki: \
+                "检测到 Amdvlk 或 amdgpu-pro vulkan 驱动，SteamVR 可能无法正常工作。 \
+            请移除它们，或使其对 SteamVR 及你要启动的游戏不可用。\n\
+            更多详细信息请访问 wiki： \
             https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting#artifacting-no-steamvr-overlay-or-graphical-glitches-in-streaming-view"
             )
         }
@@ -152,15 +152,15 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                 device_type: wgpu::DeviceType::DiscreteGpu,
             }
     });
-    debug!("have_intel_dgpu: {}", have_intel_dgpu);
+    debug!("是否存在 Intel 独显：{}", have_intel_dgpu);
 
     let steamvr_root_dir = match alvr_server_io::steamvr_root_dir() {
         Ok(dir) => dir,
         Err(e) => {
             error!(
-                "Couldn't find OpenVR or SteamVR files. \
-                Please make sure you have installed and ran SteamVR at least once. \
-                Or if you're using Flatpak Steam, make sure to use ALVR Dashboard from Flatpak ALVR. {e}"
+                "未找到 OpenVR 或 SteamVR 文件。 \
+                请确保已安装并至少运行过一次 SteamVR。 \
+                如果使用 Flatpak Steam，请确保使用 Flatpak ALVR 中的 ALVR Dashboard。{e}"
             );
             return;
         }
@@ -172,10 +172,10 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
         .into_os_string()
         .into_string()
         .unwrap();
-    debug!("vrmonitor_path: {}", vrmonitor_path_string);
+    debug!("vrmonitor 路径：{}", vrmonitor_path_string);
 
-    let steamvr_opts = "For functioning VR you need to put the following line into SteamVR's launch options and restart it:";
-    let game_opts = "And this similar line to the launch options of ALL games that you're trying to launch from steam:";
+    let steamvr_opts = "为使 VR 正常工作，需要将以下一行填入 SteamVR 的启动选项并重启 SteamVR：";
+    let game_opts = "并把类似的一行填入你要从 Steam 启动的所有游戏的启动选项：";
 
     let mut vrmonitor_path_written = false;
     if have_igpu {
@@ -202,16 +202,16 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
             vrmonitor_path_written = true;
         } else {
             warn!(
-                "Beware, using just integrated graphics might lead to very poor performance in SteamVR and VR games."
+                "注意：仅使用集成显卡可能导致 SteamVR 和 VR 游戏性能非常差。"
             );
             warn!(
-                "For more information, please refer to the wiki: https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting"
+                "更多信息请参阅 wiki：https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting"
             )
         }
     }
     if !vrmonitor_path_written {
         warn!(
-            "Make sure you have put the following line in your SteamVR launch options and restart it:\n\
+            "请确保已在 SteamVR 启动选项中填入以下一行并重启 SteamVR：\n\
             {vrmonitor_path_string} %command%"
         )
     }
@@ -224,12 +224,12 @@ fn linux_encoder_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                 match nvml_wrapper::Nvml::init() {
                     Ok(nvml) => {
                         let device_count = nvml.device_count().unwrap();
-                        debug!("nvml device count: {}", device_count);
+                        debug!("NVML 设备数量：{}", device_count);
                         // fixme: on multi-gpu nvidia system will do it twice,
                         for index in 0..device_count {
                             match nvml.device_by_index(index) {
                                 Ok(device) => {
-                                    debug!("nvml device name: {}", device.name().unwrap());
+                                    debug!("NVML 设备名称：{}", device.name().unwrap());
                                     probe_nvenc_encoder_profile(
                                         &device,
                                         nvml_wrapper::enum_wrappers::device::EncoderType::H264,
@@ -243,13 +243,13 @@ fn linux_encoder_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                                     // todo: probe for AV1 when will be available in nvml-wrapper
                                 }
                                 Err(e) => {
-                                    error!("Failed to acquire NVML device with error: {}", e)
+                                    error!("获取 NVML 设备失败，错误：{}", e)
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        alvr_common::show_e(format!("Can't initialize NVML engine, error: {e}."))
+                        alvr_common::show_e(format!("无法初始化 NVML 引擎，错误：{e}。"))
                     }
                 }
             }
@@ -257,7 +257,7 @@ fn linux_encoder_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                 let libva_display_open = libva::Display::open();
                 if let Some(libva_display) = libva_display_open {
                     if let Ok(vendor_string) = libva_display.query_vendor_string() {
-                        info!("GPU Encoder vendor: {}", vendor_string);
+                            info!("GPU 编码器厂商：{}", vendor_string);
                     }
                     probe_libva_encoder_profile(
                         &libva_display,
@@ -279,18 +279,18 @@ fn linux_encoder_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                     );
                 } else {
                     alvr_common::show_e(
-                        "Couldn't find VA-API runtime on system, \
-                        you unlikely to have hardware encoding. \
-                        Please install VA-API runtime for your distribution \
-                        and make sure it works (Manjaro, Fedora affected). \
-                        For detailed advice, check wiki: \
+                        "系统中未找到 VA-API 运行时，\
+                        可能无法使用硬件编码。\
+                        请为你的发行版安装 VA-API 运行时，\
+                        并确认其可用（Manjaro、Fedora 受影响）。\
+                        详细建议请查看 wiki：\
                         https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting#failed-to-create-vaapi-encoder",
                     );
                 }
             }
             _ => alvr_common::show_e(
-                "Couldn't determine gpu for hardware encoding. \
-            You will likely fallback to software encoding.",
+                "无法确定用于硬件编码的 GPU。\
+            可能会回退到软件编码。",
             ),
         }
     }
@@ -303,12 +303,12 @@ fn probe_nvenc_encoder_profile(
 ) {
     match device.encoder_capacity(encoder_type) {
         Ok(_) => {
-            info!("GPU supports {} profile.", profile_name);
+            info!("GPU 支持 {} 规格。", profile_name);
         }
         Err(e) => {
             if matches!(e, nvml_wrapper::error::NvmlError::NotSupported) {
                 alvr_common::show_e(format!(
-                    "Your NVIDIA gpu doesn't support {profile_name}. Please make sure CUDA is installed properly. Error: {e}"
+                    "你的 NVIDIA GPU 不支持 {profile_name}。请确认 CUDA 已正确安装。错误：{e}"
                 ))
             } else {
                 error!("{}", e)
@@ -326,22 +326,22 @@ fn probe_libva_encoder_profile(
     let profile_probe = libva_display.query_config_entrypoints(profile_type);
     let mut message = String::new();
     if profile_probe.is_err() {
-        message = format!("Couldn't find {profile_name} encoder.");
+        message = format!("未找到 {profile_name} 编码器。");
     } else if let Ok(profile) = profile_probe {
         if profile.is_empty() {
-            message = format!("{profile_name} profile entrypoint is empty.");
+            message = format!("{profile_name} 规格入口点为空。");
         } else if !profile.contains(&libva::VAEntrypoint::VAEntrypointEncSlice) {
-            message = format!("{profile_name} profile does not contain encoding entrypoint.");
+            message = format!("{profile_name} 规格不包含编码入口点。");
         }
     }
     if !message.is_empty() {
         if is_critical {
-            error!("{} Your gpu may not suport encoding with this.", message);
+            error!("{} 你的 GPU 可能无法据此进行编码。", message);
         } else {
             info!(
                 "{}
-                Your gpu may not suport encoding with this. \
-            If you're not using this encoder, ignore this message.",
+                你的 GPU 可能无法据此进行编码。 \
+            如果未使用此编码器，可忽略此消息。",
                 message
             );
         }
