@@ -129,7 +129,25 @@ pub fn replace_client_openxr_manifest(from_pattern: &str, to: &str) {
 }
 
 pub fn package_client_openxr(flavor: ReleaseFlavor, skip_admin_priv: bool) {
-    fs::remove_dir_all(afs::deps_dir().join("android_openxr")).ok();
+    // Only wipe the loader cache when the flavour needs a different set than what is on
+    // disk. This used to remove_dir_all unconditionally, which forced a re-download of
+    // every OpenXR loader (40+ MB from securecdn.oculus.com and yvrdream.com) on each
+    // packaging run - and when that CDN is unreachable the whole build dies there.
+    // The loaders are version-pinned, so an existing set is the correct set.
+    let loaders_dir = afs::deps_dir().join("android_openxr/arm64-v8a");
+    let needed: &[&str] = match flavor {
+        ReleaseFlavor::GitHub => &["", "_pico", "_pico_old", "_quest1", "_yvr"],
+        ReleaseFlavor::MetaStore => &[""],
+        ReleaseFlavor::PicoStore => &["", "_pico", "_pico_old"],
+    };
+    let all_present = needed.iter().all(|suffix| {
+        loaders_dir
+            .join(format!("libopenxr_loader{suffix}.so"))
+            .exists()
+    });
+    if !all_present {
+        fs::remove_dir_all(afs::deps_dir().join("android_openxr")).ok();
+    }
 
     let openxr_selection = match flavor {
         ReleaseFlavor::GitHub => OpenXRLoadersSelection::All,

@@ -353,10 +353,24 @@ fn get_android_openxr_loaders(selection: OpenXRLoadersSelection) {
     fn get_openxr_loader(name: &str, url: &str, source_dir: &str) {
         let sh = Shell::new().unwrap();
         let temp_dir = afs::build_dir().join("temp_download");
-        sh.remove_path(&temp_dir).ok();
-        sh.create_dir(&temp_dir).unwrap();
         let destination_dir = afs::deps_dir().join("android_openxr/arm64-v8a");
         fs::create_dir_all(&destination_dir).unwrap();
+
+        // Reuse an already-extracted loader instead of downloading it again.
+        //
+        // This step previously deleted its temp dir and re-fetched the archive on every
+        // package-client run. That made packaging depend on the CDN being reachable, and
+        // when it is not the build dies at command::download_and_extract_zip with
+        // "schannel: CRYPT_E_REVOCATION_OFFLINE" - a certificate revocation check that
+        // cannot complete offline. The loader is version-pinned (OPENXR_VERSION), so a
+        // file already in deps/ is the right one and the download is pure overhead.
+        let destination = destination_dir.join(format!("libopenxr_loader{name}.so"));
+        if destination.exists() {
+            return;
+        }
+
+        sh.remove_path(&temp_dir).ok();
+        sh.create_dir(&temp_dir).unwrap();
 
         command::download_and_extract_zip(url, &temp_dir).unwrap();
         fs::copy(
