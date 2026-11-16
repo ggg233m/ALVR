@@ -57,7 +57,7 @@ pub fn new_output(config: Option<&CustomAudioDeviceConfig>) -> Result<Device> {
     let device = match config {
         None => host
             .default_output_device()
-            .context("No output audio device found")?,
+            .context("未找到音频输出设备")?,
         Some(config) => device_from_custom_config(&host, config, true)?,
     };
 
@@ -70,7 +70,7 @@ pub fn new_input(config: Option<CustomAudioDeviceConfig>) -> Result<Device> {
     let device = match config {
         None => host
             .default_input_device()
-            .context("No input audio device found")?,
+            .context("未找到音频输入设备")?,
         Some(config) => device_from_custom_config(&host, &config, false)?,
     };
 
@@ -95,7 +95,7 @@ pub fn new_virtual_microphone_pair(config: MicrophoneDevicesConfig) -> Result<(D
             ]
             .into_iter()
             .find_map(|cable_type| new_virtual_microphone_pair(cable_type).ok())
-            .context("No microphones found");
+            .context("未找到麦克风");
         }
 
         MicrophoneDevicesConfig::VAC => ("Line 1", "Line 1"),
@@ -119,12 +119,12 @@ pub fn new_virtual_microphone_pair(config: MicrophoneDevicesConfig) -> Result<(D
     let sink = host
             .output_devices()?
             .find(|d| d.name().unwrap_or_default().contains(sink_name))
-            .context("Virtual Audio Cable, VB-CABLE or VoiceMeeter not found. Please install or reinstall one")?;
+            .context("未找到 Virtual Audio Cable、VB-CABLE 或 VoiceMeeter，请安装或重新安装其中之一")?;
 
     let source = host
         .input_devices()?
         .find(|d| d.name().unwrap_or_default().contains(source_name))
-        .context("Matching output microphone not found. Did you rename it?")?;
+        .context("未找到匹配的输出麦克风，是否重命名过？")?;
 
     Ok((sink, source))
 }
@@ -399,7 +399,7 @@ pub fn receive_samples_loop(
         let mut sample_buffer_ref = sample_buffer.lock();
 
         if data.had_packet_loss() {
-            info!("Audio packet loss!");
+            info!("音频丢包！");
 
             if sample_buffer_ref.len() / channels_count < batch_frames_count {
                 sample_buffer_ref.clear();
@@ -445,7 +445,7 @@ pub fn receive_samples_loop(
                 }
 
                 sample_buffer_ref.extend(recovery_sample_buffer.drain(..));
-                info!("Audio recovered");
+                info!("音频已恢复");
             }
         } else {
             sample_buffer_ref.extend(&new_samples);
@@ -454,7 +454,7 @@ pub fn receive_samples_loop(
         // todo: use smarter policy with EventTiming
         let buffer_frames_size = sample_buffer_ref.len() / channels_count;
         if buffer_frames_size > 2 * average_buffer_frames_count + batch_frames_count {
-            info!("Audio buffer overflow! size: {buffer_frames_size}");
+            info!("音频缓冲区溢出！大小：{buffer_frames_size}");
 
             let drained_samples = sample_buffer_ref
                 .drain(0..(buffer_frames_size - average_buffer_frames_count) * channels_count)

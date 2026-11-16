@@ -79,7 +79,7 @@ impl WiredConnection {
                             }
                         }
                         Err(failure) => {
-                            warn!("wired_connection: get_uptime failed with {}", failure);
+                            warn!("有线连接：获取运行时间失败，{}", failure);
                         }
                     }
                 }

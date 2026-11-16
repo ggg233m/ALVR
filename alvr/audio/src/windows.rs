@@ -44,7 +44,7 @@ fn get_windows_device(device: &Device) -> Result<IMMDevice> {
             }
         }
 
-        bail!("No device found with specified name")
+        bail!("未找到指定名称的设备")
     }
 }
 

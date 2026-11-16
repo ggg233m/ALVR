@@ -27,6 +27,18 @@ pub const MDNS_DEVICE_ID_KEY: &str = "device_id";
 
 pub const WIRED_CLIENT_HOSTNAME: &str = "client.wired";
 
+/// Largest value `SO_RCVBUF`/`SO_SNDBUF` can actually hold.
+///
+/// socket2 casts the `usize` argument with `as c_int`, so `u32::MAX` becomes `-1`.
+/// Measured on Windows: `setsockopt(SO_RCVBUF, -1)` returns 0 (success), the kernel stores
+/// -1, `getsockopt` reads it back, and the `as usize` in socket2 turns that into
+/// `18446744073709551615` — so the old code logged "succeeded" while the kernel kept using
+/// its 64 KB default. With a 64 KB receive buffer a 310 KB video frame cannot be handed over
+/// in one read(), which is why the client measured 99.5% of reads below 4 KB.
+///
+/// `i32::MAX` is the largest value that survives the cast unchanged.
+const MAX_SOCKET_BUFFER_SIZE: u32 = i32::MAX as u32;
+
 fn set_socket_buffers(socket: &socket2::Socket, buffer_config: SocketBufferConfig) -> Result<()> {
     info!(
         "Initial socket buffer size: send: {}B, recv: {}B",
@@ -37,18 +49,23 @@ fn set_socket_buffers(socket: &socket2::Socket, buffer_config: SocketBufferConfi
     {
         let maybe_size = match buffer_config.send_size_bytes {
             SocketBufferSize::Default => None,
-            SocketBufferSize::Maximum => Some(u32::MAX),
+            SocketBufferSize::Maximum => Some(MAX_SOCKET_BUFFER_SIZE),
             SocketBufferSize::Custom(size) => Some(size),
         };
 
         if let Some(size) = maybe_size {
             if let Err(e) = socket.set_send_buffer_size(size as usize) {
-                info!("Error setting socket send buffer: {e}");
+                info!("设置套接字发送缓冲区出错：{e}");
             } else {
-                info!(
-                    "Set socket send buffer succeeded: {}",
-                    socket.send_buffer_size()?
-                );
+                // Record both numbers and let the actual value be the result.
+                //
+                // `set_send_buffer_size` returning Ok is not proof: an out-of-range value is
+                // accepted and silently stored, which is exactly how the old u32::MAX setting
+                // appeared to succeed while the kernel kept its 64 KB default. But Windows also
+                // legitimately clamps to its own limit, so a value below the request is not by
+                // itself a failure and must not be reported as one.
+                let actual = socket.send_buffer_size()?;
+                info!("Socket send buffer: requested {size}B, actual {actual}B");
             }
         }
     }
@@ -56,18 +73,17 @@ fn set_socket_buffers(socket: &socket2::Socket, buffer_config: SocketBufferConfi
     {
         let maybe_size = match buffer_config.recv_size_bytes {
             SocketBufferSize::Default => None,
-            SocketBufferSize::Maximum => Some(u32::MAX),
+            SocketBufferSize::Maximum => Some(MAX_SOCKET_BUFFER_SIZE),
             SocketBufferSize::Custom(size) => Some(size),
         };
 
         if let Some(size) = maybe_size {
             if let Err(e) = socket.set_recv_buffer_size(size as usize) {
-                info!("Error setting socket recv buffer: {e}");
+                info!("设置套接字接收缓冲区出错：{e}");
             } else {
-                info!(
-                    "Set socket recv buffer succeeded: {}",
-                    socket.recv_buffer_size()?
-                );
+                // See the send branch: record the request and the result separately.
+                let actual = socket.recv_buffer_size()?;
+                info!("Socket recv buffer: requested {size}B, actual {actual}B");
             }
         }
     }
@@ -171,7 +187,7 @@ impl SocketConnection {
 
         let signal = control_socket.recv(timeout)?;
         if !matches!(signal, ClientControlPacket::StreamReady) {
-            con_bail!("Got unexpected packet waiting for stream ack");
+            con_bail!("等待流确认时收到意外的数据包");
         }
 
         let stream_socket = StreamSocketBuilder::connect_to_client(
@@ -201,7 +217,7 @@ impl SocketConnection {
         match control_socket.recv(timeout)? {
             ServerControlPacket::StartStream => (),
             ServerControlPacket::Restarting => return Ok(ServerConnectionResult::Restarting),
-            _ => con_bail!("Got unexpected packet waiting for stream start"),
+            _ => con_bail!("等待流开始时收到意外的数据包"),
         }
 
         let stream_socket_builder = StreamSocketBuilder::listen_for_server(
