@@ -90,6 +90,18 @@ pub enum NvencAdaptiveQuantizationMode {
 #[repr(u8)]
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[schema(gui = "button_group")]
+pub enum VplTargetUsage {
+    #[schema(strings(display_name = "Best quality"))]
+    BestQuality = 1,
+    #[schema(strings(display_name = "Balanced"))]
+    Balanced = 4,
+    #[schema(strings(display_name = "Best speed"))]
+    BestSpeed = 7,
+}
+
+#[repr(u8)]
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[schema(gui = "button_group")]
 pub enum RateControlMode {
     #[schema(strings(display_name = "CBR"))]
     Cbr = 0,
@@ -236,14 +248,16 @@ pub struct EncoderConfig {
     #[schema(flag = "steamvr-restart")]
     #[schema(strings(
         display_name = "Quality preset",
-        help = "Controls overall quality preset of the encoder. Works only on Windows AMD AMF, Linux VAAPI (AMD/Intel)."
+        help = r"Controls overall quality preset of the encoder. Works only on Windows AMD AMF and Linux VAAPI (AMD/Intel).
+Intel GPUs on Windows use the oneVPL backend, which never reads this value: use 'Target usage' under 'Intel ARC (oneVPL)' instead."
     ))]
     pub quality_preset: EncoderQualityPreset,
 
     #[schema(
         strings(
             display_name = "Enable VBAQ/CAQ",
-            help = "Enables Variance Based Adaptive Quantization on h264 and HEVC, and Content Adaptive Quantization on AV1"
+            help = r"Enables Variance Based Adaptive Quantization on h264 and HEVC, and Content Adaptive Quantization on AV1. Only has an effect on AMD (AMF) and NVIDIA (NVENC) GPUs.
+Intel ARC has no equivalent setting: oneVPL offers no content-adaptive quantization, and the closest option (AdaptiveCQM) is rejected by the driver, so this checkbox does nothing there."
         ),
         flag = "steamvr-restart"
     )]
@@ -262,8 +276,12 @@ VBR: Variable BitRate mode. Not commended because it may throw off the adaptive 
     #[schema(flag = "steamvr-restart")]
     pub h264_profile: H264Profile,
 
-    #[schema(strings(help = r#"CAVLC algorithm is recommended.
-CABAC produces better compression but it's significantly slower and may lead to runaway latency"#))]
+    #[schema(strings(
+        display_name = "h264: Entropy coding",
+        help = r#"Only has an effect for h264. HEVC is required by the standard to use CABAC, and AV1 uses its own arithmetic coder, so neither reads this value.
+
+CAVLC is faster but compresses worse. CABAC compresses better but both encoding and decoding are significantly slower, which can lead to runaway latency."#
+    ))]
     #[schema(flag = "steamvr-restart")]
     pub entropy_coding: EntropyCoding,
 
@@ -300,8 +318,35 @@ CABAC produces better compression but it's significantly slower and may lead to 
     #[schema(flag = "steamvr-restart")]
     pub amf: AmfConfig,
 
+    #[cfg_attr(not(target_os = "windows"), schema(flag = "hidden"))]
+    #[schema(strings(display_name = "Intel ARC (oneVPL)"))]
+    #[schema(flag = "steamvr-restart")]
+    pub vpl: VplConfig,
+
     #[schema(strings(display_name = "Software (CPU) encoding"))]
     pub software: SoftwareEncodingConfig,
+}
+
+/// Settings for the Intel oneVPL (Quick Sync / ARC) encoder.
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[schema(collapsible)]
+pub struct VplConfig {
+    #[schema(strings(
+        display_name = "Target usage",
+        help = r"Controls the encoder speed/quality trade-off for Intel GPUs (ARC, Iris Xe, Quick Sync).
+Best quality is significantly slower; best speed may reduce image quality.
+
+On an Arc A770 (DG2), which only ships the low-power (VDEnc) encoder, the driver accepts the value and reports it back, but the measured throughput barely changes between Balanced and Best speed. On this class of GPU expect the setting to have little or no effect."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub target_usage: VplTargetUsage,
+
+    #[schema(strings(
+        help = "Use the low-power (VDENC) encoding path. Lower power draw and heat, but may reduce quality or compatibility on some Intel GPUs."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub low_power: bool,
+
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -730,6 +775,16 @@ If you want to reduce the amount of pixelation on the edges, increase the center
         help = "Attempts to use a software decoder on the device. Slow, but may work around broken codecs."
     ))]
     pub force_software_decoder: bool,
+
+    #[schema(strings(
+        display_name = "IDR frame interval",
+        help = r"Maximum time the image can stay corrupted after a lost packet, because a decoder can only resynchronise on an IDR frame.
+On Intel ARC the driver ignores the encoder's GOP size for AV1, so this cadence is enforced by the server rather than the encoder.
+Shorter values recover faster but cost bitrate; 0 disables the periodic keyframes."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    #[schema(gui(slider(min = 0, max = 5000, step = 100)), suffix = "ms")]
+    pub idr_frame_interval_ms: u64,
 
     pub mediacodec_extra_options: Vec<(String, MediacodecProperty)>,
 
@@ -1591,6 +1646,17 @@ pub struct NewVersionPopupConfig {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct ExtraConfig {
+    #[schema(strings(
+        display_name = "Enable diagnostics",
+        help = r"Enables the high-frequency timing instrumentation added during the stutter investigation (PRESENTINT, VSYNCWAIT, POSESEL, ENCINPUT, FRAMESPAN, CHAINEND, DECWAIT, PUREDEC and similar).
+
+These probes fire every frame and do real work on the hot path: they walk the pose buffer, accumulate atomics, and format a log line every 90-180 frames. That costs measurable CPU and, in the worst cases, perturbs the very timing they are measuring. Leave this OFF for normal use and turn it on only when capturing a trace.
+
+This is separate from the debug log groups below: those emit ordinary debug! logs that are compiled out in release builds, while these diagnostics are warn!-level and would otherwise always run."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub enable_diagnostics: bool,
+
     #[schema(strings(display_name = "SteamVR Launcher"))]
     pub steamvr_launcher: SteamvrLauncher,
     pub capture: CaptureConfig,
@@ -1832,6 +1898,13 @@ pub fn session_settings_default() -> SettingsDefault {
                     preproc_sigma: 4,
                     preproc_tor: 7,
                 },
+                vpl: VplConfigDefault {
+                    gui_collapsed: true,
+                    target_usage: VplTargetUsageDefault {
+                        variant: VplTargetUsageDefaultVariant::Balanced,
+                    },
+                    low_power: false,
+                },
                 software: SoftwareEncodingConfigDefault {
                     gui_collapsed: true,
                     force_software_encoding: false,
@@ -1903,6 +1976,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             force_software_decoder: false,
+            idr_frame_interval_ms: 1000,
             color_correction: SwitchDefault {
                 enabled: false,
                 content: ColorCorrectionConfigDefault {
@@ -2240,6 +2314,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     decoder: false,
                 },
             },
+            enable_diagnostics: false,
             steamvr_launcher: SteamvrLauncherDefault {
                 open_close_steamvr_with_dashboard: false,
                 direct_launch: false,

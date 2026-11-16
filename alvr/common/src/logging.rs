@@ -5,6 +5,56 @@ use serde::{Deserialize, Serialize};
 use settings_schema::SettingsSchema;
 use std::{error::Error, fmt::Display, sync::OnceLock};
 
+/// Process-wide switch for the high-frequency timing instrumentation.
+///
+/// The probes live in several crates (sockets, server_core, client_core, client_openxr),
+/// and the socket layer in particular has no handle on any settings object. Rather than
+/// thread a flag through every call chain, each process publishes the setting here once
+/// when it loads settings, and the guards read a relaxed atomic.
+///
+/// Off unless ExtraConfig::enable_diagnostics is set. The probes run per frame and do
+/// real work (atomics, buffer walks, formatting a line every 90-180 frames), so they are
+/// not free and they perturb the timing they measure.
+pub static DIAGNOSTICS_ENABLED: std::sync::atomic::AtomicBool
+    = std::sync::atomic::AtomicBool::new(false);
+
+/// Set once by the server process, never by the client.
+///
+/// `dump` needs to know which half of the four boundaries this process owns, and the two
+/// sides share this crate, so the distinction has to be published rather than inferred.
+pub static SERVER_SIDE: std::sync::atomic::AtomicBool
+    = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_server_side() {
+    SERVER_SIDE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn diagnostics_enabled() -> bool {
+    DIAGNOSTICS_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_diagnostics_enabled(enabled: bool) {
+    let was = DIAGNOSTICS_ENABLED.swap(enabled, std::sync::atomic::Ordering::Relaxed);
+
+    // Turning diagnostics OFF is the natural end of a capture, so flush the frame trace
+    // here. It has to happen at this moment rather than on the frame path: `dump` formats
+    // and writes a few hundred lines, which is exactly the kind of work that made the
+    // earlier probes distort what they were measuring.
+    //
+    // The ring is a per-process static, so each process prints only the boundaries it owns.
+    // SERVER_DUMP_IS_SET distinguishes the two: the server sets it when it loads settings,
+    // the client never does.
+    if was && !enabled {
+        crate::frame_trace::dump(if SERVER_SIDE.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::frame_trace::TraceSide::Server
+        } else {
+            crate::frame_trace::TraceSide::Client
+        });
+    }
+}
+
 pub const SERVER_IMPL_DBG_LABEL: &str = "SERVER IMPL";
 pub const CLIENT_IMPL_DBG_LABEL: &str = "CLIENT IMPL";
 pub const SERVER_CORE_DBG_LABEL: &str = "SERVER CORE";

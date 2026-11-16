@@ -1,6 +1,7 @@
 mod average;
 mod c_api;
 mod connection_result;
+pub mod frame_trace;
 pub mod inputs;
 mod logging;
 mod primitives;
@@ -20,6 +21,7 @@ pub use settings_schema;
 pub use average::*;
 pub use c_api::*;
 pub use connection_result::*;
+pub use frame_trace::*;
 pub use inputs::*;
 pub use log::{debug, error, info, warn};
 pub use logging::*;
