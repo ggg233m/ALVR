@@ -1,6 +1,6 @@
 use crate::SESSION_MANAGER;
 use alvr_common::{LogEntry, LogSeverity, log::LevelFilter};
-use alvr_events::{Event, EventType};
+use alvr_events::{Event, EventType, TELEMETRY_TARGET};
 use chrono::Local;
 use fern::Dispatch;
 use std::{fs, path::PathBuf, sync::LazyLock};
@@ -50,6 +50,7 @@ pub fn init_logging(session_log_path: Option<PathBuf>, crash_log_path: Option<Pa
                 timestamp: Local::now().format("%H:%M:%S.%3f").to_string(),
                 event_type,
             };
+
             out.finish(format_args!(
                 "{} [{}] {}",
                 event.timestamp,
@@ -66,14 +67,21 @@ pub fn init_logging(session_log_path: Option<PathBuf>, crash_log_path: Option<Pa
         log_dispatch = log_dispatch.level(LevelFilter::Info);
     }
 
+    // Telemetry (dashboard graphs) is broadcast from the formatter above and must not reach
+    // the file. Excluding it here rather than in the outer filter keeps the broadcast alive:
+    // the outer filter would drop the record before the formatter ever runs.
     log_dispatch = if let Some(path) = session_log_path {
         log_dispatch.chain(
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(path)
-                .unwrap(),
+            Dispatch::new()
+                .filter(|meta| meta.target() != TELEMETRY_TARGET)
+                .chain(
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(path)
+                        .unwrap(),
+                ),
         )
     } else if cfg!(target_os = "linux") {
         // this sink is required to make sure all log gets processed and forwarded to the websocket

@@ -697,7 +697,7 @@ impl ButtonMappingManager {
                         ButtonValue::Scalar(value.clamp(0.0, 1.0))
                     }
                     _ => {
-                        error!("Failed to map button!");
+                        error!("按键映射失败！");
                         continue;
                     }
                 };
@@ -722,7 +722,7 @@ impl ButtonMappingManager {
             let button_name = BUTTON_INFO
                 .get(&source_button.path_id)
                 .map_or("Unknown", |info| info.path);
-            info!("Received button not mapped: {button_name}");
+            info!("收到未映射的按键：{button_name}");
         }
 
         destination_buttons

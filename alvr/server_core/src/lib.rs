@@ -145,7 +145,7 @@ pub fn create_recording_file(connection_context: &ConnectionContext, settings: &
                 .ok();
         }
         Err(e) => {
-            error!("Failed to record video on disk: {e}");
+            error!("视频写入磁盘失败：{e}");
         }
     }
 }
@@ -158,12 +158,28 @@ pub fn notify_restart_driver() {
     {
         alvr_events::send_event(EventType::ServerRequestsSelfRestart);
     } else {
-        error!("Cannot restart SteamVR. No dashboard process found on local device.");
+        error!("无法重启 SteamVR：本地未找到 Dashboard 进程。");
     }
 }
 
 pub fn settings() -> Settings {
     SESSION_MANAGER.read().settings().clone()
+}
+
+/// Cheap read of the diagnostics switch, for hot-path guards.
+///
+/// This used to take `SESSION_MANAGER.read()` on every call. That is a shared lock plus a
+/// settings lookup, and it is reached from the frame path (`VideoSend`, the encoder input
+/// probe, the tracking loop), where even an uncontended lock acquisition is wasteful and a
+/// contended one directly perturbs the timing being measured.
+///
+/// It now reads the atomic that `alvr_common` owns, which is a single relaxed load. The
+/// atomic is kept current by `alvr_common::set_diagnostics_enabled`, called from
+/// `InitializeRuntime`, `InitializeStreaming`, and `web_server::sync_diagnostics_flag`
+/// (the runtime settings-update path). Every writer must go through one of those, otherwise
+/// a toggle would not be seen until the next stream start.
+pub fn diagnostics_enabled() -> bool {
+    alvr_common::diagnostics_enabled()
 }
 
 pub fn steamvr_hmd_init_config() -> SteamvrHmdInitConfig {
@@ -307,13 +323,53 @@ impl ServerCoreContext {
         let max_prediction =
             Duration::from_millis(SESSION_MANAGER.read().settings().headset.max_prediction_ms);
 
-        if latency > max_prediction {
-            warn!("Latency is too high. Clamping prediction");
+        let latency = if latency > max_prediction {
+            // Rate-limited: this is reached on every tracking poll while the prediction is
+            // clamped, which was measured at 4280 times in one session. Each warn!() is a
+            // synchronous disk write on the tracking thread, and that thread feeds
+            // SubmitLayer, so an unthrottled log here perturbs the very timing being
+            // measured.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                if n <= 3 || n % 900 == 0 {
+                    warn!("延迟过高，正在限制预测值 (第 {n} 次)");
+                }
+            }
 
             max_prediction
         } else {
             latency
+        };
+
+        // TEMPORARY EXPERIMENT (A/B switch, no source edit needed between runs).
+        //
+        // ALVR extrapolates the head position with "position += linear_velocity * dt"
+        // where dt is this latency (~23 ms). The head has no velocity filtering
+        // (MotionConfig::default in tracking/mod.rs), so any noise in the reported
+        // velocity is multiplied by 23 ms and lands directly in the image. The measured
+        // worst-case frame-to-frame velocity change is ~91 mm/s, which at 23 ms is
+        // ~2.1 mm - the same magnitude as the reported jitter.
+        //
+        // Setting ALVR_PREDICT_SCALE=0 disables the position extrapolation entirely
+        // without touching any other logic, which tells us whether that term is the
+        // source: if the jitter changes, it is; if nothing changes, it is not.
+        {
+            use std::sync::OnceLock;
+            static SCALE: OnceLock<f64> = OnceLock::new();
+            let scale = *SCALE.get_or_init(|| {
+                std::env::var("ALVR_PREDICT_SCALE")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1.0)
+            });
+            if (scale - 1.0).abs() > f64::EPSILON {
+                return Duration::from_secs_f64(latency.as_secs_f64() * scale);
+            }
         }
+
+        latency
     }
 
     pub fn get_tracker_pose_time_offset(&self) -> Duration {
@@ -456,10 +512,10 @@ impl ServerCoreContext {
                         .events_sender
                         .send(ServerCoreEvent::RequestIDR)
                         .ok();
-                    warn!("Dropping video packet. Reason: Can't push to network");
+                    warn!("丢弃视频数据包，原因：无法推送到网络");
                 }
             } else {
-                warn!("Dropping video packet. Reason: Waiting for IDR frame");
+                warn!("丢弃视频数据包，原因：等待 IDR 帧");
             }
 
             if let Some(stats) = &mut *self.connection_context.statistics_manager.write() {
@@ -503,8 +559,21 @@ impl ServerCoreContext {
     pub fn report_present(&self, target_timestamp: Duration, offset: Duration) {
         dbg_server_core!("report_present");
 
-        if let Some(stats) = &mut *self.connection_context.statistics_manager.write() {
-            stats.report_frame_present(target_timestamp, offset);
+        // Take the queued diagnostics OUT while the lock is held, but write them only
+        // after it is released. fern chains straight to the log file handle, so a
+        // warn!() here is a synchronous disk write; doing it under the statistics lock
+        // stalls the frame-submission thread, which needs the same lock.
+        let pending_logs = {
+            let mut guard = self.connection_context.statistics_manager.write();
+            if let Some(stats) = &mut *guard {
+                stats.report_frame_present(target_timestamp, offset);
+                stats.take_pending_logs()
+            } else {
+                Vec::new()
+            }
+        };
+        for message in pending_logs {
+            alvr_common::warn!("{message}");
         }
 
         let session_manager_lock = SESSION_MANAGER.read();

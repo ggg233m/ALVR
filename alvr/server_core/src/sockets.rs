@@ -51,7 +51,7 @@ impl WelcomeSocket {
                             let protocols = format!(
                                 "Protocols: server={server_protocol}, client={client_protocol}"
                             );
-                            warn!("Found incompatible client {hostname}! {reason}\n{protocols}");
+                            warn!("发现不兼容的客户端 {hostname}！{reason}\n{protocols}");
                         }
 
                         clients.insert(hostname.into(), address.to_ip_addr());

@@ -262,7 +262,7 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
     let welcome_socket = match WelcomeSocket::new() {
         Ok(socket) => socket,
         Err(e) => {
-            error!("Failed to create discovery socket: {e:?}");
+            error!("创建发现套接字失败：{e:?}");
             return;
         }
     };
@@ -402,7 +402,7 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
             let clients = match welcome_socket.recv_all() {
                 Ok(clients) => clients,
                 Err(e) => {
-                    warn!("mDNS listening error: {e:?}");
+                    warn!("mDNS 监听错误：{e:?}");
 
                     thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                     continue;
@@ -452,7 +452,7 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
                         [(client_ip, client_hostname.clone())].into_iter().collect(),
                     )
                 {
-                    error!("Could not initiate connection for {client_hostname}: {e}");
+                    error!("无法为 {client_hostname} 发起连接：{e}");
                 }
 
                 thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
@@ -501,7 +501,7 @@ fn try_connect(
                 client_hostname.clone(),
                 client_ip,
             ) {
-                error!("Handshake error for {client_hostname}: {e}");
+                error!("与 {client_hostname} 握手失败：{e}");
             }
 
             let mut clients_to_be_removed = ctx.clients_to_be_removed.lock();
@@ -566,7 +566,7 @@ fn connection_pipeline(
 
             info.streaming_capabilities
         } else {
-            debug!("Found client in standby. Retrying");
+            debug!("发现客户端处于待机状态，正在重试");
             return Ok(());
         };
 
@@ -657,7 +657,7 @@ fn connection_pipeline(
         .refresh_rates
         .contains(&initial_settings.video.preferred_fps)
     {
-        warn!("Chosen refresh rate not supported. Using {fps}Hz");
+        warn!("所选刷新率不受支持，改用 {fps}Hz");
     }
 
     let foveated_encoding = if let Switch::Enabled(config) =
@@ -735,7 +735,7 @@ fn connection_pipeline(
 
             Some(params)
         } else {
-            warn!("Foveated encoding is not supported by the client.");
+            warn!("客户端不支持注视点编码。");
 
             None
         }
@@ -752,7 +752,7 @@ fn connection_pipeline(
         };
 
         if profile != H264Profile::High {
-            warn!("High profile encoding is not supported by the client.");
+            warn!("客户端不支持 High profile 编码。");
         }
 
         profile
@@ -767,7 +767,7 @@ fn connection_pipeline(
         .unwrap_or(streaming_caps.prefer_10bit);
 
     if enable_10_bits_encoding && !streaming_caps.encoder_10_bits {
-        warn!("10 bits encoding is not supported by the client.");
+        warn!("客户端不支持 10 位编码。");
         enable_10_bits_encoding = false
     }
 
@@ -792,7 +792,7 @@ fn connection_pipeline(
         };
 
         if codec != CodecType::AV1 {
-            warn!("AV1 encoding is not supported by the client.");
+            warn!("客户端不支持 AV1 编码。");
         }
 
         codec
@@ -823,7 +823,7 @@ fn connection_pipeline(
                 // VoiceMeeter and Custom devices may have arbitrary internal routing.
                 // Therefore, we cannot detect the loopback issue without knowing the routing.
                 if alvr_audio::is_same_device(&game_audio_device, &sink) {
-                    con_bail!("Game audio and microphone cannot point to the same device!");
+                    con_bail!("游戏音频与麦克风不能指向同一个设备！");
                 }
             }
 
@@ -932,7 +932,19 @@ fn connection_pipeline(
     let video_send_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
         let client_hostname = client_hostname.clone();
+        let control_sender = Arc::clone(&control_sender);
         move || {
+            // The client asks for an IDR (and therefore its decoder config) during
+            // the handshake, which happens before the encoder has produced a single
+            // frame - so decoder_config is still None and the server replies with
+            // nothing. H264/HEVC decoders recover by parsing SPS/PPS out of the
+            // bitstream, which is why this was never noticed; AV1 has no such
+            // fallback and stays black until it receives csd-0.
+            //
+            // Push the config from here instead: by the time the first video packet
+            // arrives, ParseFrameNals has already captured the config NALs/OBUs.
+            let mut config_pushed = false;
+
             while is_streaming(&client_hostname) {
                 let VideoPacket {
                     mut header,
@@ -943,6 +955,19 @@ fn connection_pipeline(
                     Err(RecvTimeoutError::Disconnected) => return,
                 };
 
+                if !config_pushed
+                    && let Some(config) = ctx.decoder_config.lock().clone()
+                {
+                    config_pushed = control_sender
+                        .lock()
+                        .send(&ServerControlPacket::DecoderConfig(config))
+                        .is_ok();
+
+                    if config_pushed {
+                        info!("已发送解码器配置（首个视频包之前）。");
+                    }
+                }
+
                 ctx.tracking_manager
                     .read()
                     .unrecenter_view_params(&mut header.global_view_params);
@@ -951,6 +976,13 @@ fn connection_pipeline(
                 video_sender
                     .send_header_with_payload(&header, &payload)
                     .ok();
+
+                // Second boundary: the socket accepted the packet. Compared against the
+                // encoded timestamp this isolates "encoder finished but the send queue was
+                // backed up" from "the bytes left promptly and the wire was slow".
+                if crate::diagnostics_enabled() {
+                    alvr_common::record_sent(header.timestamp.as_nanos() as u64);
+                }
             }
         }
     });
@@ -970,7 +1002,7 @@ fn connection_pipeline(
                     let device = match alvr_audio::new_output(config.device.as_ref()) {
                         Ok(data) => data,
                         Err(e) => {
-                            warn!("New audio device failed: {e:?}");
+                            warn!("切换新音频设备失败：{e:?}");
                             thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                             continue;
                         }
@@ -1002,7 +1034,7 @@ fn connection_pipeline(
                         2,
                         config.mute_when_streaming,
                     ) {
-                        error!("Audio record error: {e:?}");
+                        error!("音频录制错误：{e:?}");
                     }
 
                     #[cfg(windows)]
@@ -1189,7 +1221,7 @@ fn connection_pipeline(
         move || {
             while is_streaming(&client_hostname) {
                 if let Err(e) = control_sender.lock().send(&ServerControlPacket::KeepAlive) {
-                    info!("Client disconnected. Cause: {e:?}");
+                    info!("客户端已断开，原因：{e:?}");
 
                     disconnect_notif.notify_one();
 
@@ -1236,7 +1268,7 @@ fn connection_pipeline(
                     Ok(packet) => packet,
                     Err(ConnectionError::TryAgain(_)) => {
                         if Instant::now() > disconnection_deadline {
-                            info!("Client disconnected. Timeout");
+                            info!("客户端已断开：超时");
                             break;
                         } else {
                             continue;
@@ -1260,12 +1292,12 @@ fn connection_pipeline(
                             let area = packet.unwrap_or(Vec2::new(2.0, 2.0));
                             let wh = area.x * area.y;
                             if wh.is_finite() && wh > 0.0 {
-                                info!("Received new playspace with size: {}", area);
+                                info!("收到新的游玩空间，大小：{}", area);
                                 ctx.events_sender
                                     .send(ServerCoreEvent::PlayspaceSync(area))
                                     .ok();
                             } else {
-                                warn!("Received invalid playspace size: {}", area);
+                                warn!("收到无效的游玩空间大小：{}", area);
                                 ctx.events_sender
                                     .send(ServerCoreEvent::PlayspaceSync(Vec2::new(2.0, 2.0)))
                                     .ok();
@@ -1422,11 +1454,11 @@ fn connection_pipeline(
             .env("ACTION", "connect")
             .spawn()
         {
-            warn!("Failed to run connect script: {e}");
+            warn!("运行连接脚本失败：{e}");
         }
     }
     if initial_settings.extra.capture.startup_video_recording {
-        info!("Creating recording file");
+        info!("正在创建录制文件");
         crate::create_recording_file(&ctx, session_manager_lock.settings());
     }
 
@@ -1483,7 +1515,7 @@ fn connection_pipeline(
             .env("ACTION", "disconnect")
             .spawn()
         {
-            warn!("Failed to run disconnect script: {e}");
+            warn!("运行断开脚本失败：{e}");
         }
     }
 

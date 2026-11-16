@@ -56,6 +56,17 @@ pub struct StatisticsManager {
     last_vsync_time: Instant,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
+    /// Diagnostics produced while this manager was locked.
+    ///
+    /// Writing a log line is a synchronous disk write: fern chains straight to the file
+    /// handle. Doing that under the statistics lock blocks the frame-submission thread,
+    /// which needs the same lock. Measured with ETW: the statistics thread spent 40.62 ms
+    /// inside the log write, the submitting thread then waited 32.45 ms for the lock, and
+    /// the frame interval stretched to 44.86 ms, which the headset showed as repeated
+    /// frames.
+    ///
+    /// So the text is collected here and emitted after the caller drops the lock.
+    pending_logs: Vec<String>,
 }
 
 impl StatisticsManager {
@@ -86,10 +97,16 @@ impl StatisticsManager {
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+            pending_logs: Vec::new(),
         }
     }
 
-    pub fn report_tracking_received(&mut self, target_timestamp: Duration) {
+    /// Hand the queued diagnostics to the caller so it can log them after dropping the lock.
+    pub fn take_pending_logs(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_logs)
+    }
+
+        pub fn report_tracking_received(&mut self, target_timestamp: Duration) {
         if !self
             .history_buffer
             .iter()
@@ -108,6 +125,36 @@ impl StatisticsManager {
     }
 
     pub fn report_frame_present(&mut self, target_timestamp: Duration, offset: Duration) {
+        // MEASUREMENT NOTE: the lookup below is an exact timestamp match, and a miss leaves
+        // last_frame_present_interval untouched while still counting towards PRESENTINT's n.
+        // That silently inflates the reported interval (a stale value from several frames ago
+        // gets attributed to this sample). Count hits and misses so the series can be trusted
+        // only while misses stay negligible.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static HIT: AtomicU64 = AtomicU64::new(0);
+            static MISS: AtomicU64 = AtomicU64::new(0);
+            let found = self
+                .history_buffer
+                .iter()
+                .any(|frame| frame.target_timestamp == target_timestamp);
+            if found {
+                HIT.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let m = MISS.fetch_add(1, Ordering::Relaxed) + 1;
+                if m % 180 == 0 && crate::diagnostics_enabled() {
+                    // Deferred: see `pending_logs`. Writing here would block the submitting
+                    // thread, which needs this same lock.
+                    self.pending_logs.push(format!(
+                        "PRESENTMATCH hits={} misses={} miss_ratio={:.2}%",
+                        HIT.load(Ordering::Relaxed),
+                        m,
+                        m as f64 * 100.0 / (HIT.load(Ordering::Relaxed) + m) as f64
+                    ));
+                }
+            }
+        }
+
         if let Some(frame) = self
             .history_buffer
             .iter_mut()
@@ -120,6 +167,82 @@ impl StatisticsManager {
             self.last_frame_present_instant = now;
 
             frame.frame_present = now;
+
+            // TEMPORARY DIAGNOSTIC (server output rate, full account).
+            //
+            // The client measures NALs arriving every 11.23 ms on average, i.e. 89.0 fps
+            // rather than 90, with 18.6% of gaps over 12 ms. That irregularity propagates
+            // straight through the decoder (DECWAIT shows it waits one frame per NAL) into
+            // an empty client queue 11% of the time. This counter measures the same
+            // interval on the producing side, plus the two sub-intervals that can cause it:
+            //
+            //   present  - wall-clock spacing of Present() calls (the real output rate)
+            //   gpu->enc - frame_composed -> frame_encoded (CopyToStaging + encode handoff)
+            //   trk->gpu - tracking_received -> frame_composed (waiting for a fresh pose)
+            //
+            // If "present" matches the client's 11.23 ms, the server is the origin and the
+            // fix belongs here. If "present" is a clean 11.11 ms, the irregularity is
+            // introduced downstream (network) and the server is innocent.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                static SUM: AtomicU64 = AtomicU64::new(0);
+                static MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+                static MAX: AtomicU64 = AtomicU64::new(0);
+                static SUM_D: AtomicU64 = AtomicU64::new(0);
+                static MAX_D: AtomicU64 = AtomicU64::new(0);
+                static PREV: AtomicU64 = AtomicU64::new(u64::MAX);
+                static HIST: [AtomicU64; 6] = [
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                ];
+
+                let us = self.last_frame_present_interval.as_micros() as u64;
+                let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                SUM.fetch_add(us, Ordering::Relaxed);
+                MIN.fetch_min(us, Ordering::Relaxed);
+                MAX.fetch_max(us, Ordering::Relaxed);
+                let prev = PREV.swap(us, Ordering::Relaxed);
+                if prev != u64::MAX {
+                    let d = us.abs_diff(prev);
+                    SUM_D.fetch_add(d, Ordering::Relaxed);
+                    MAX_D.fetch_max(d, Ordering::Relaxed);
+                }
+                let hb = match us {
+                    0..=9999 => 0,
+                    10000..=11499 => 1,
+                    11500..=12999 => 2,
+                    13000..=22999 => 3,
+                    23000..=44999 => 4,
+                    _ => 5,
+                };
+                HIST[hb].fetch_add(1, Ordering::Relaxed);
+
+                if n % 180 == 0 && crate::diagnostics_enabled() {
+                    let c = n as f64;
+                    // Deferred: see `pending_logs`.
+                    self.pending_logs.push(format!(
+                        "PRESENTINT n={} avg={:.2}ms fps={:.2} min={:.2}ms max={:.2}ms | jitter_avg={:.3}ms jitter_max={:.3}ms | hist(<10,10-11.5,11.5-13,13-23,23-45,45+ms)={}/{}/{}/{}/{}/{}",
+                        n,
+                        SUM.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                        1e6 / (SUM.load(Ordering::Relaxed) as f64 / c),
+                        MIN.load(Ordering::Relaxed) as f64 / 1000.0,
+                        MAX.load(Ordering::Relaxed) as f64 / 1000.0,
+                        SUM_D.load(Ordering::Relaxed) as f64 / (c - 1.0) / 1000.0,
+                        MAX_D.load(Ordering::Relaxed) as f64 / 1000.0,
+                        HIST[0].load(Ordering::Relaxed),
+                        HIST[1].load(Ordering::Relaxed),
+                        HIST[2].load(Ordering::Relaxed),
+                        HIST[3].load(Ordering::Relaxed),
+                        HIST[4].load(Ordering::Relaxed),
+                        HIST[5].load(Ordering::Relaxed),
+                    ));
+                }
+            }
         }
     }
 
@@ -300,11 +423,48 @@ impl StatisticsManager {
     pub fn duration_until_next_vsync(&mut self) -> Duration {
         let now = Instant::now();
 
+        // PACING LEAD: TESTED AND REVERTED 2026-11-16.
+        //
+        // Running the grid 0.5% fast to keep the client queue non-empty was tried here.
+        // The intent was to convert "renderer finds nothing, image held" into "surplus
+        // frame discarded", since a held image is a visible stall and a dropped frame is
+        // not. It does not work, because ALVR does not own the frame clock: SteamVR calls
+        // SubmitLayer on its own schedule and duration_until_next_vsync only decides how
+        // long PostPresent sleeps inside that call.
+        //
+        // Measured with ALVR_PACING_LEAD=1.005:
+        //   server fps      89.82 -> 88.52   (it got SLOWER, not faster)
+        //   empty_ratio      0.19% -> 1.45%
+        //   CHAINEND delta   0.78 ms -> 0.78 ms (unchanged - the judder metric did not move)
+        //   decoder in_sd    2.84 ms -> 3.58 ms
+        //   QDEPTH avg       1.10 -> 1.09
+        //
+        // Shortening the grid makes the sleep end earlier relative to SteamVR's own call,
+        // so the loop drifts out of phase with the real pacing and loses more often.
+
         // update the last vsync if it's too old
         while self.last_vsync_time + self.frame_interval < now {
             self.last_vsync_time += self.frame_interval;
         }
 
+        // SLEEP OVERSHOOT COMPENSATION: TESTED AND REVERTED 2026-11-16.
+        //
+        // thread::sleep on Windows overshoots by a stable ~0.33 ms (SLEEPACC over_avg
+        // 0.331-0.337 ms, bulk in the 0.3-0.5 ms bucket). Subtracting that from the requested
+        // sleep looks like an obvious way to close the gap between cycle 11.29 ms and the
+        // 11.111 ms target.
+        //
+        // It makes things worse. Measured with a 330 us subtraction:
+        //   req_avg   9.606 -> 7.841 ms   (fell 1.77 ms, not the 0.33 that was subtracted)
+        //   post_avg  9.95  -> 8.18 ms
+        //   gap_avg   0.93  -> 2.43 ms    (SteamVR pushed further away instead)
+        //   cycle_avg 11.29 -> 11.60 ms   (worse, not better)
+        //
+        // The reason is that to_grid is recomputed from Instant::now() on every call, so it
+        // already absorbs the previous overshoot; shortening the request moves the phase
+        // against SteamVR's SubmitFrameThread instead of removing the overshoot. This is the
+        // same trap as the earlier ALVR_PACING_LEAD and "return 1.6 ms early" experiments:
+        // anything that perturbs the requested sleep desynchronises the loop.
         (self.last_vsync_time + self.frame_interval).saturating_duration_since(now)
     }
 }

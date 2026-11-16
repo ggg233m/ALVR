@@ -153,7 +153,7 @@ async fn events_websocket(ws: WebSocketUpgrade) -> Response {
                         .send(Message::Text(json::to_string(&event).unwrap().into()))
                         .await
                     {
-                        info!("Failed to send event with websocket: {e}");
+                        info!("通过 WebSocket 发送事件失败：{e}");
                         break;
                     }
                 }
@@ -175,13 +175,34 @@ async fn get_session() {
     )));
 }
 
+/// Push the session's diagnostics switch into the lock-free atomic the hot paths read.
+///
+/// Called from every runtime settings-update entry point. Cheap: one lock acquisition on a
+/// path that already holds the session lock anyway, and the value it publishes is what lets
+/// `diagnostics_enabled()` avoid that lock on the frame path.
+fn sync_diagnostics_flag() {
+    let enabled = SESSION_MANAGER.read().settings().extra.enable_diagnostics;
+    alvr_common::set_diagnostics_enabled(enabled);
+}
+
 async fn update_session(Json(config): Json<SessionConfig>) {
     *SESSION_MANAGER.write().session_mut() = config;
+
+    // Keep the lock-free diagnostics flag in sync. The hot-path guards read an atomic
+    // instead of taking SESSION_MANAGER's lock, so this is the only place that can tell
+    // them the switch moved. Without it a runtime toggle would only take effect after the
+    // next InitializeStreaming.
+    sync_diagnostics_flag();
 }
 
 async fn set_session_values(Json(descs): Json<Vec<PathValuePair>>) {
-    if let Err(e) = SESSION_MANAGER.write().set_session_values(descs) {
-        error!("Failed to set session values: {e}");
+    let result = SESSION_MANAGER.write().set_session_values(descs);
+
+    // See update_session: the hot paths read the atomic, not the session lock.
+    sync_diagnostics_flag();
+
+    if let Err(e) = result {
+        error!("设置会话参数失败：{e}");
     }
 }
 
@@ -222,9 +243,9 @@ async fn add_firewall_rules() {
     if let Err(e) =
         alvr_server_io::firewall_rules(FirewallRulesAction::Add, FILESYSTEM_LAYOUT.get().unwrap())
     {
-        error!("Failed to add firewall rules! code: {e}");
+        error!("添加防火墙规则失败！代码：{e}");
     } else {
-        info!("Successfully added firewall rules!");
+        info!("已成功添加防火墙规则！");
     }
 }
 
@@ -233,9 +254,9 @@ async fn remove_firewall_rules() {
         FirewallRulesAction::Remove,
         FILESYSTEM_LAYOUT.get().unwrap(),
     ) {
-        error!("Failed to remove firewall rules! code: {e}");
+        error!("移除防火墙规则失败！代码：{e}");
     } else {
-        info!("Successfully removed firewall rules!");
+        info!("已成功移除防火墙规则！");
     }
 }
 

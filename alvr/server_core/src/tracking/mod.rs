@@ -153,6 +153,97 @@ impl TrackingManager {
         for &(device_id, mut motion) in device_motions {
             if device_id == *inp::HEAD_ID {
                 self.last_head_pose = motion.pose;
+
+                // TEMPORARY DIAGNOSTIC (E2): the head is the only device with no
+                // velocity filtering (MotionConfig::default() above, cutoff 0),
+                // and predict() multiplies this velocity by ~80 ms, so any noise
+                // here becomes millimetres of position error. Measure the
+                // frame-to-frame noise of the reported velocity directly.
+                {
+                    use alvr_common::parking_lot::Mutex;
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static N: AtomicU64 = AtomicU64::new(0);
+                    static SUM_V: AtomicU64 = AtomicU64::new(0);
+                    static SUM_V2: AtomicU64 = AtomicU64::new(0);
+                    static SUM_DV: AtomicU64 = AtomicU64::new(0);
+                    static MAX_DV: AtomicU64 = AtomicU64::new(0);
+                    static PREV: Mutex<Option<Vec3>> = Mutex::new(None);
+                    // Histogram of frame-to-frame velocity change, in 1 mm/s bins.
+                    // bin i covers [i, i+1) mm/s; with dt = 80 ms the resulting
+                    // position error is i * 0.08 mm, so bin 12 is where error
+                    // reaches 1 mm. This is what tells us how OFTEN the jitter
+                    // happens - the average hides it, the max overstates it.
+                    static DVHIST: [AtomicU64; 8] = [
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                    ];
+                    static DVHIST_OVER: AtomicU64 = AtomicU64::new(0);
+
+                    let v = motion.linear_velocity;
+                    let speed = v.length();
+                    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                    SUM_V.fetch_add((speed * 1e6) as u64, Ordering::Relaxed);
+                    SUM_V2.fetch_add(((speed * 1e6) as u64) * ((speed * 1e6) as u64) / 1000, Ordering::Relaxed);
+
+                    let mut prev = PREV.lock();
+                    if let Some(p) = *prev {
+                        let dv = (v - p).length();
+                        // micrometres per second: integer, keeps precision for
+                        // values around a few mm/s without floating point in the
+                        // atomics.
+                        let dv_ums = (dv * 1e6) as u64; // um/s
+                        SUM_DV.fetch_add(dv_ums, Ordering::Relaxed);
+                        MAX_DV.fetch_max(dv_ums, Ordering::Relaxed);
+                        // bucket on mm/s: 4 mm/s bins
+                        let dv_mms = dv_ums / 1000;
+                        // 4 mm/s bins: bin i covers [4i, 4i+4) mm/s.
+                        // Position error = dv * 80 ms, so bin 3 (>=12 mm/s)
+                        // corresponds to >= 0.96 mm - the threshold that matters.
+                        if dv_mms < 32 {
+                            DVHIST[(dv_mms / 4) as usize].fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            DVHIST_OVER.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    *prev = Some(v);
+                    drop(prev);
+
+                    if n % 90 == 0 && crate::diagnostics_enabled() {
+                        let c = n as f64;
+                        let mean = SUM_V.load(Ordering::Relaxed) as f64 / c / 1e6;
+                        let mean_sq = SUM_V2.load(Ordering::Relaxed) as f64 / c * 1000.0 / 1e12;
+                        let std = (mean_sq - mean * mean).max(0.0).sqrt();
+                        // frame-to-frame velocity noise -> position error at 80ms
+                        // SUM_DV is in um/s; report mm/s.
+                        let dv_mean = SUM_DV.load(Ordering::Relaxed) as f64 / c / 1000.0;
+                        let dv_max = MAX_DV.load(Ordering::Relaxed) as f64 / 1000.0;
+                        alvr_common::warn!(
+                            "HEADVEL n={} speed_avg={:.4}m/s speed_std={:.4}m/s | dv_avg={:.2}mm/s dv_max={:.2}mm/s | pos_err_avg={:.2}mm max={:.2}mm | DVHIST(4mm/s bins)={}/{}/{}/{}/{}/{}/{}/{} over={}",
+                            n,
+                            mean,
+                            std,
+                            dv_mean,
+                            dv_max,
+                            dv_mean * 0.080,
+                            dv_max * 0.080,
+                            DVHIST[0].load(Ordering::Relaxed),
+                            DVHIST[1].load(Ordering::Relaxed),
+                            DVHIST[2].load(Ordering::Relaxed),
+                            DVHIST[3].load(Ordering::Relaxed),
+                            DVHIST[4].load(Ordering::Relaxed),
+                            DVHIST[5].load(Ordering::Relaxed),
+                            DVHIST[6].load(Ordering::Relaxed),
+                            DVHIST[7].load(Ordering::Relaxed),
+                            DVHIST_OVER.load(Ordering::Relaxed),
+                        );
+                    }
+                }
             }
 
             if let Some(config) = device_motion_configs.get(&device_id) {
@@ -217,6 +308,36 @@ impl TrackingManager {
                         }
                     }
 
+                    // TEMPORARY DIAGNOSTIC: the returned sample is always the first
+                    // one at or after sample_timestamp, so it can be up to one
+                    // tracking-packet interval in the future and the offset jumps
+                    // around. The position error that causes is speed * offset.
+                    if device_id == *inp::HEAD_ID {
+                        use std::sync::atomic::{AtomicU64, Ordering};
+                        static N: AtomicU64 = AtomicU64::new(0);
+                        static SUM: AtomicU64 = AtomicU64::new(0);
+                        static MAX: AtomicU64 = AtomicU64::new(0);
+                        static MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+                        let us = best_timestamp_diff.as_micros() as u64;
+                        let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                        SUM.fetch_add(us, Ordering::Relaxed);
+                        MAX.fetch_max(us, Ordering::Relaxed);
+                        MIN.fetch_min(us, Ordering::Relaxed);
+                        if n % 90 == 0 && crate::diagnostics_enabled() {
+                            let c = n as f64;
+                            let mn = MIN.load(Ordering::Relaxed);
+                            let mx = MAX.load(Ordering::Relaxed);
+                            alvr_common::warn!(
+                                "SAMPLEDIFF n={} avg={:.2}ms min={:.2}ms max={:.2}ms spread={:.2}ms | pos_err_max={:.2}mm",
+                                n,
+                                SUM.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                                mn as f64 / 1000.0,
+                                mx as f64 / 1000.0,
+                                (mx - mn) as f64 / 1000.0,
+                                mx as f64 / 1000.0 * 0.1766,
+                            );
+                        }
+                    }
                     (best_timestamp_diff != Duration::MAX).then_some(*best_motion_ref)
                 } else {
                     None
