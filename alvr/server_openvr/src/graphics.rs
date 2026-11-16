@@ -6,6 +6,10 @@ static COMPRESS_AXIS_ALIGNED_CSO: &[u8] =
 static COLOR_CORRECTION_CSO: &[u8] =
     include_bytes!("../cpp/platform/win32/ColorCorrectionPixelShader.cso");
 static RGBTOYUV420_CSO: &[u8] = include_bytes!("../cpp/platform/win32/rgbtoyuv420.cso");
+// RGBA -> NV12 for the oneVPL encoder. Two entry points, one plane each; see
+// rgbtoyuv420nv12.hlsl for why this cannot reuse RGBTOYUV420_CSO.
+static NV12_Y_CSO: &[u8] = include_bytes!("../cpp/platform/win32/nv12_y.cso");
+static NV12_UV_CSO: &[u8] = include_bytes!("../cpp/platform/win32/nv12_uv.cso");
 
 static QUAD_SHADER_COMP_SPV: &[u8] = include_bytes!("../cpp/platform/linux/shader/quad.comp.spv");
 static COLOR_SHADER_COMP_SPV: &[u8] = include_bytes!("../cpp/platform/linux/shader/color.comp.spv");
@@ -27,6 +31,10 @@ pub fn initialize_shaders() {
         crate::COLOR_CORRECTION_CSO_LEN = COLOR_CORRECTION_CSO.len() as _;
         crate::RGBTOYUV420_CSO_PTR = RGBTOYUV420_CSO.as_ptr();
         crate::RGBTOYUV420_CSO_LEN = RGBTOYUV420_CSO.len() as _;
+        crate::NV12_Y_CSO_PTR = NV12_Y_CSO.as_ptr();
+        crate::NV12_Y_CSO_LEN = NV12_Y_CSO.len() as _;
+        crate::NV12_UV_CSO_PTR = NV12_UV_CSO.as_ptr();
+        crate::NV12_UV_CSO_LEN = NV12_UV_CSO.len() as _;
         crate::QUAD_SHADER_COMP_SPV_PTR = QUAD_SHADER_COMP_SPV.as_ptr();
         crate::QUAD_SHADER_COMP_SPV_LEN = QUAD_SHADER_COMP_SPV.len() as _;
         crate::COLOR_SHADER_COMP_SPV_PTR = COLOR_SHADER_COMP_SPV.as_ptr();

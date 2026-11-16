@@ -45,7 +45,11 @@ namespace
 
 	bool CreateDevice( IDXGIAdapter *pDXGIAdapter, ID3D11Device **pD3D11Device, ID3D11DeviceContext **pD3D11Context )
 	{
-		UINT creationFlags = 0;
+		// VIDEO_SUPPORT is required to obtain ID3D11VideoDevice/ID3D11VideoContext
+		// from this device. The AV1 encoder needs them to convert its RGBA input
+		// to NV12 (4:2:0); without the flag QueryInterface simply fails and AV1
+		// has to fall back to encoding 4:4:4, which hardware decoders reject.
+		UINT creationFlags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 #if _DEBUG
 		creationFlags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif

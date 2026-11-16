@@ -185,6 +185,10 @@ const unsigned char* COMPRESS_AXIS_ALIGNED_CSO_PTR;
 unsigned int COMPRESS_AXIS_ALIGNED_CSO_LEN;
 const unsigned char* COLOR_CORRECTION_CSO_PTR;
 unsigned int COLOR_CORRECTION_CSO_LEN;
+const unsigned char* NV12_Y_CSO_PTR;
+unsigned int NV12_Y_CSO_LEN;
+const unsigned char* NV12_UV_CSO_PTR;
+unsigned int NV12_UV_CSO_LEN;
 const unsigned char* RGBTOYUV420_CSO_PTR;
 unsigned int RGBTOYUV420_CSO_LEN;
 

@@ -1,5 +1,7 @@
 #include "CEncoder.h"
 
+#include "alvr_server/Settings.h"
+
 CEncoder::CEncoder()
     : m_bExiting(false)
     , m_targetTimestampNs(0) {
@@ -135,8 +137,63 @@ void CEncoder::Run() {
                 m_targetTimestampNs,
                 m_scheduler.CheckIDRInsertion()
             );
+
+            // Frame-trace boundary: Transmit has unwound. Everything from VideoSend to here
+            // (callbacks, locks) is the tail the earlier probe did not cover.
+            if (DiagEnabled()) {
+                RecordTransmitReturn(m_targetTimestampNs);
+            }
+
+            // TEMPORARY DIAGNOSTIC (server half of the gap comparison). The client reports
+            // that ~9.9% of decoded frame timestamps are further apart than 1.25 frame
+            // periods, with a worst case of 16 frame periods. This measures the same
+            // quantity on the producing side: the spacing of the target timestamps we
+            // hand to the encoder. Comparing the two histograms says whether the gaps are
+            // created upstream (encoder input is irregular) or downstream (network and
+            // decode). The buckets are counted in units of the 90 Hz frame period so the
+            // two sides can be compared directly.
+            {
+                static std::atomic<uint64_t> n(0), gap1(0), gap2(0), gap3(0);
+                static std::atomic<uint64_t> prevTs(0), maxGapNs(0);
+                const uint64_t periodNs = 11111111ull; // 90 Hz nominal
+
+                const uint64_t cur = m_targetTimestampNs;
+                const uint64_t prev = prevTs.exchange(cur);
+                if (prev != 0 && cur > prev) {
+                    const uint64_t gap = cur - prev;
+                    uint64_t prevMax = maxGapNs.load();
+                    while (gap > prevMax && !maxGapNs.compare_exchange_weak(prevMax, gap)) { }
+                    if (gap > periodNs + periodNs / 4) {
+                        if (gap < 2 * periodNs) {
+                            gap1.fetch_add(1);
+                        } else if (gap < 3 * periodNs) {
+                            gap2.fetch_add(1);
+                        } else {
+                            gap3.fetch_add(1);
+                        }
+                    }
+                }
+
+                const uint64_t i = n.fetch_add(1) + 1;
+                if (DiagEnabled() && i % 180 == 0) {
+                    Warn(
+                        "ENCINPUT n=%llu gap>1.25f=%llu gap>=2f=%llu gap>=3f=%llu gap_max=%.2fms (period=11.11ms)\n",
+                        (unsigned long long)i,
+                        (unsigned long long)gap1.load(),
+                        (unsigned long long)gap2.load(),
+                        (unsigned long long)gap3.load(),
+                        (double)maxGapNs.load() / 1e6
+                    );
+                }
+            }
         }
 
+        // Frame-trace boundary: this is what releases the submitting thread's
+        // WaitForEncode. It is NOT the VideoSend instant - the statistics block above sits
+        // between them, which is why a fast encode and a long WaitForEncode can coexist.
+        if (DiagEnabled()) {
+            RecordEncodeFinished(m_targetTimestampNs);
+        }
         m_encodeFinished.Set();
     }
 }

@@ -152,7 +152,11 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
             (0, 0, false, 0.0, false)
         };
 
+    alvr_common::set_server_side();
+    alvr_common::set_diagnostics_enabled(settings.extra.enable_diagnostics);
+
     Settings {
+        m_enableDiagnostics: settings.extra.enable_diagnostics,
         m_refreshRate: refresh_rate,
         m_renderWidth: render_width,
         m_renderHeight: render_height,
@@ -195,6 +199,8 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
         m_entropyCoding: video.encoder_config.entropy_coding as u32,
         m_forceSwEncoding: video.encoder_config.software.force_software_encoding,
         m_swThreadCount: video.encoder_config.software.thread_count,
+        m_vplTargetUsage: video.encoder_config.vpl.target_usage as u32,
+        m_vplLowPower: video.encoder_config.vpl.low_power,
         m_nvencTuningPreset: nvenc.tuning_preset as u32,
         m_nvencMultiPass: nvenc.multi_pass as u32,
         m_nvencAdaptiveQuantizationMode: nvenc.adaptive_quantization_mode as u32,
@@ -213,6 +219,7 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
         m_nvencRcAverageBitrate: nvenc.rc_average_bitrate,
         m_nvencEnableWeightedPrediction: nvenc.enable_weighted_prediction,
         m_minimumIdrIntervalMs: settings.connection.minimum_idr_interval_ms,
+        m_idrFrameIntervalMs: settings.video.idr_frame_interval_ms,
         m_enableViveTrackerProxy: settings.headset.enable_vive_tracker_proxy,
         m_trackingRefOnly: settings.headset.tracking_ref_only,
         m_enableLinuxVulkanAsyncCompute: settings.extra.patches.linux_async_compute,
@@ -469,7 +476,7 @@ fn spawn_event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                         let now = Instant::now();
                         if now.saturating_duration_since(last_resync).as_secs_f32() > 0.1 {
                             last_resync = now;
-                            warn!("Desync detected. Attempting recovery.");
+                            warn!("检测到不同步，正在尝试恢复。");
                             unsafe {
                                 RequestDriverResync();
                             }
@@ -527,7 +534,7 @@ pub unsafe extern "C" fn register_buttons(instance_ptr: *mut c_void, device_id: 
                 unsafe { RegisterButton(instance_ptr, button_id) };
             }
         } else {
-            error!("Cannot register unrecognized button ID {button_id}");
+            error!("无法注册未识别的按键 ID {button_id}");
         }
     }
 }
@@ -583,20 +590,186 @@ extern "C" fn report_encoder_foveation_centers(
     }
 }
 
+#[unsafe(export_name = "RecordSubmitEntry")]
+extern "C" fn record_submit_entry(timestamp_ns: u64, at_us: u64) {
+    alvr_common::record_submit_entry(timestamp_ns, at_us);
+}
+
+#[unsafe(export_name = "RecordPresentEntry")]
+extern "C" fn record_present_entry(timestamp_ns: u64, at_us: u64) {
+    alvr_common::record_present_entry(timestamp_ns, at_us);
+}
+
+#[unsafe(export_name = "RecordPresentExit")]
+extern "C" fn record_present_exit(timestamp_ns: u64) {
+    alvr_common::record_present_exit(timestamp_ns);
+}
+
+#[unsafe(export_name = "RecordPostEntry")]
+extern "C" fn record_post_entry(timestamp_ns: u64) {
+    alvr_common::record_post_entry(timestamp_ns);
+}
+
+#[unsafe(export_name = "RecordPostExit")]
+extern "C" fn record_post_exit(timestamp_ns: u64, cpu_100ns: u64) {
+    alvr_common::record_post_exit(timestamp_ns, cpu_100ns);
+}
+
+#[unsafe(export_name = "RecordPresentAbort")]
+extern "C" fn record_present_abort(timestamp_ns: u64, reason: u32, hr: i32) {
+    alvr_common::record_present_abort(timestamp_ns, reason, hr);
+}
+
+#[unsafe(export_name = "RecordSubmitCpu")]
+extern "C" fn record_submit_cpu(timestamp_ns: u64, cpu_100ns: u64) {
+    alvr_common::record_submit_cpu(timestamp_ns, cpu_100ns);
+}
+
+#[unsafe(export_name = "RecordFrameReady")]
+extern "C" fn record_frame_ready(timestamp_ns: u64) {
+    alvr_common::record_frame_ready(timestamp_ns);
+}
+
+#[unsafe(export_name = "RecordTransmitReturn")]
+extern "C" fn record_transmit_return(timestamp_ns: u64) {
+    alvr_common::record_transmit_return(timestamp_ns);
+}
+
+#[unsafe(export_name = "RecordEncodeFinished")]
+extern "C" fn record_encode_finished(timestamp_ns: u64) {
+    alvr_common::record_encode_finished(timestamp_ns);
+}
+
+#[unsafe(export_name = "RecordEncoderInput")]
+extern "C" fn record_encoder_input(timestamp_ns: u64) {
+    alvr_common::record_encoder_input(timestamp_ns);
+}
+
 #[unsafe(export_name = "VideoSend")]
 extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_idr: bool) {
     if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
         let timestamp = Duration::from_nanos(timestamp_ns);
         let buffer = unsafe { std::slice::from_raw_parts(buffer_ptr, len as usize) };
 
-        let Some(head_pose) = HEAD_POSE_QUEUE
-            .lock()
-            .iter()
-            .find_map(|(ts, pose)| (*ts == timestamp).then_some(*pose))
-        else {
+        // First of the four boundaries: the encoder has produced this frame.
+        if alvr_server_core::diagnostics_enabled() {
+            alvr_common::record_encoded(timestamp_ns);
+        }
+
+        // TEMPORARY DIAGNOSTIC: the pose lookup is an EXACT timestamp match and
+        // a miss drops the whole video frame. Count hits/misses and, on a miss,
+        // how far the nearest entry is - a small non-zero distance would mean the
+        // frame is being dropped purely because of timestamp skew, which is
+        // exactly the kind of thing that varies with encoder timing (bitrate).
+        let pose_lookup = {
+            let queue = HEAD_POSE_QUEUE.lock();
+            let exact = queue
+                .iter()
+                .find_map(|(ts, pose)| (*ts == timestamp).then_some(*pose));
+            let nearest = queue
+                .iter()
+                .map(|(ts, _)| {
+                    if *ts >= timestamp {
+                        (*ts - timestamp).as_nanos() as i64
+                    } else {
+                        -((timestamp - *ts).as_nanos() as i64)
+                    }
+                })
+                .min_by_key(|d| d.unsigned_abs())
+                .unwrap_or(0);
+            // How much fresher the newest tracking entry is than the one this frame was
+            // stamped with. This is the quantity that matters: whatever pose is looked up
+            // here gets multiplied into global_view_params, so a stale lookup is a stale
+            // *position* baked into the image. Before the PoseHistory fix this was the
+            // match error itself; after it, it is zero whenever no newer tracking packet
+            // arrived between SubmitLayer and VideoSend.
+            let staleness = queue
+                .back()
+                .map(|(ts, _)| ts.saturating_sub(timestamp).as_nanos() as u64)
+                .unwrap_or(0);
+            (exact, nearest, queue.len(), staleness)
+        };
+        let Some(head_pose) = pose_lookup.0 else {
+            {
+                use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+                static HIT: AtomicU64 = AtomicU64::new(0);
+                static MISS: AtomicU64 = AtomicU64::new(0);
+                static LAST_NEAREST: AtomicI64 = AtomicI64::new(0);
+                MISS.fetch_add(1, Ordering::Relaxed);
+                LAST_NEAREST.store(pose_lookup.1, Ordering::Relaxed);
+                let m = MISS.load(Ordering::Relaxed);
+                if m % 45 == 0 && alvr_server_core::diagnostics_enabled() {
+                    let h = HIT.load(Ordering::Relaxed);
+                    alvr_common::warn!(
+                        "POSELOOKUP hit={} miss={} ({:.1}% miss) nearest_delta={}ns queue={}",
+                        h,
+                        m,
+                        m as f64 * 100.0 / (h + m) as f64,
+                        LAST_NEAREST.load(Ordering::Relaxed),
+                        pose_lookup.2,
+                    );
+                }
+            }
             // We can't submit the frame without its pose
             return;
         };
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static HIT: AtomicU64 = AtomicU64::new(0);
+            static N: AtomicU64 = AtomicU64::new(0);
+            // Distribution of how stale the looked-up pose is. If the pairing is correct
+            // these are all zero. A nonzero population here means the frame carries an
+            // older head position than the newest tracking sample, i.e. the image is being
+            // rendered with a stale viewpoint - visible only while translating.
+            static SUM_STALE: AtomicU64 = AtomicU64::new(0);
+            static MAX_STALE: AtomicU64 = AtomicU64::new(0);
+            static NONZERO: AtomicU64 = AtomicU64::new(0);
+            static HIST: [AtomicU64; 5] = [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ];
+
+            let h = HIT.fetch_add(1, Ordering::Relaxed) + 1;
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+
+            let stale_us = pose_lookup.3 / 1000;
+            SUM_STALE.fetch_add(stale_us, Ordering::Relaxed);
+            MAX_STALE.fetch_max(stale_us, Ordering::Relaxed);
+            if stale_us > 0 {
+                NONZERO.fetch_add(1, Ordering::Relaxed);
+            }
+            // buckets in microseconds: 0, <1ms, <2ms, <4ms, >=4ms
+            let b = match stale_us {
+                0 => 0,
+                1..=999 => 1,
+                1000..=1999 => 2,
+                2000..=3999 => 3,
+                _ => 4,
+            };
+            HIST[b].fetch_add(1, Ordering::Relaxed);
+
+            if n % 90 == 0 && alvr_server_core::diagnostics_enabled() {
+                let c = n as f64;
+                alvr_common::warn!(
+                    "POSELOOKUP ok n={} hits={} | POSESTALE avg={:.3}ms max={:.3}ms nonzero={}/{} ({:.1}%) | hist(0,<1,<2,<4,>=4 ms)={}/{}/{}/{}/{}",
+                    n,
+                    h,
+                    SUM_STALE.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                    MAX_STALE.load(Ordering::Relaxed) as f64 / 1000.0,
+                    NONZERO.load(Ordering::Relaxed),
+                    n,
+                    NONZERO.load(Ordering::Relaxed) as f64 * 100.0 / c,
+                    HIST[0].load(Ordering::Relaxed),
+                    HIST[1].load(Ordering::Relaxed),
+                    HIST[2].load(Ordering::Relaxed),
+                    HIST[3].load(Ordering::Relaxed),
+                    HIST[4].load(Ordering::Relaxed),
+                );
+            }
+        }
 
         let local_views_params = LOCAL_VIEW_PARAMS.read();
 
@@ -674,17 +847,160 @@ extern "C" fn wait_for_vsync() {
     static PRE_HEADSET_STATS_WAIT_INTERVAL: Duration = Duration::from_millis(8);
 
     // NB: don't sleep while locking SERVER_DATA_MANAGER or SERVER_CORE_CONTEXT
+    // NOTE (measurement correctness): this instant must be taken BEFORE
+    // duration_until_next_vsync(), not just before thread::sleep. The duration is the
+    // remaining time to the next grid point as computed here; everything spent between
+    // that computation and the sleep call is part of the interval being measured.
+    // Taking the instant later made "requested" systematically larger than it really was,
+    // so the reported overshoot was meaningless.
+    let t_request = std::time::Instant::now();
+
     let sleep_duration = SERVER_CORE_CONTEXT
         .read()
         .as_ref()
         .and_then(|ctx| ctx.duration_until_next_vsync());
 
     if let Some(duration) = sleep_duration {
+        // TEMPORARY DIAGNOSTIC: the frame pacing sleeps until the next tick of a
+        // free-running software grid (statistics.rs:299-309) whose phase is
+        // arbitrary relative to the headset's real vsync. If that grid drifts
+        // against the panel, the sleep duration wanders between 0 and one full
+        // interval, the frame interval jumps by up to half an interval, and the
+        // resulting pose/image timing offset is visible as position jitter while
+        // translating. A wide or bimodal distribution here confirms it; a narrow
+        // band refutes it.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            static SUM: AtomicU64 = AtomicU64::new(0);
+            static MAX: AtomicU64 = AtomicU64::new(0);
+            static MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+            static BUCKET: [AtomicU64; 8] = [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ];
+
+            let us = duration.as_micros() as u64;
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            SUM.fetch_add(us, Ordering::Relaxed);
+            MAX.fetch_max(us, Ordering::Relaxed);
+            MIN.fetch_min(us, Ordering::Relaxed);
+            // buckets over 0..11.2 ms
+            let b = (us / 1400).min(7) as usize;
+            BUCKET[b].fetch_add(1, Ordering::Relaxed);
+
+            if n % 180 == 0 && alvr_server_core::diagnostics_enabled() {
+                let c = n as f64;
+                alvr_common::warn!(
+                    "VSYNCWAIT n={} avg={:.2}ms min={:.2}ms max={:.2}ms | hist(1.4ms bins)={}/{}/{}/{}/{}/{}/{}/{}",
+                    n,
+                    SUM.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                    MIN.load(Ordering::Relaxed) as f64 / 1000.0,
+                    MAX.load(Ordering::Relaxed) as f64 / 1000.0,
+                    BUCKET[0].load(Ordering::Relaxed),
+                    BUCKET[1].load(Ordering::Relaxed),
+                    BUCKET[2].load(Ordering::Relaxed),
+                    BUCKET[3].load(Ordering::Relaxed),
+                    BUCKET[4].load(Ordering::Relaxed),
+                    BUCKET[5].load(Ordering::Relaxed),
+                    BUCKET[6].load(Ordering::Relaxed),
+                    BUCKET[7].load(Ordering::Relaxed),
+                );
+            }
+        }
+
         if alvr_server_core::settings()
             .video
             .enforce_server_frame_pacing
         {
-            thread::sleep(duration);
+            // TEMPORARY DIAGNOSTIC (sleep accuracy).
+            //
+            // post_avg (8.49 ms) exceeds VSYNCWAIT avg (8.17 ms) by ~0.32 ms, which is the
+            // overshoot of thread::sleep itself. Over 385 frames that is 123 ms - more
+            // than a whole frame period - so it can plausibly be the source of the 0.029
+            // ms/frame deficit that drops the output to 89.77 fps and produces one missed
+            // frame every ~4.2 s.
+            //
+            // What matters is not the mean but the TAIL: if the overshoot distribution has
+            // a long tail, individual frames land late and the grid skips a step. The
+            // histogram is therefore in 100 us buckets up to 1 ms and beyond.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                static SUM_REQ: AtomicU64 = AtomicU64::new(0);
+                static SUM_ACT: AtomicU64 = AtomicU64::new(0);
+                static MAX_OVER: AtomicU64 = AtomicU64::new(0);
+                static SUM_OVER: AtomicU64 = AtomicU64::new(0);
+                static HO: [AtomicU64; 6] = [
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                ];
+
+                // Measured from t_request (taken before the grid lookup), so this is the
+                // whole interval from "ask how long to wait" to "sleep finished".
+                let t0 = t_request;
+                let req_us = duration.as_micros() as u64;
+                // Sleep the full duration to the next grid point.
+                //
+                // Two alternatives were measured and both are worse, so this stays:
+                //
+                //   spin_sleep (accurate to 0.14 ms): cycle_avg 11.14 -> 11.27 ms,
+                //     gap_avg 1.58 -> 1.87 ms, fps 89.6 -> 87.1. A more accurate sleep
+                //     does not help because WaitForVSync recomputes its target from the
+                //     current time and the callback gap absorbs whatever is given back.
+                //
+                //   sleeping 1.6 ms short to "let the gap fill the rest": cycle_avg
+                //     collapsed to 6.48 ms, act (5.36 ms) fell below req (6.20 ms) and fps
+                //     dropped to 79.1. The gap is not a fixed cost to compensate for; it is
+                //     SteamVR waiting on its own schedule, and returning early desynchronises
+                //     the whole frame loop.
+                thread::sleep(duration);
+                let act_us = t0.elapsed().as_micros() as u64;
+                let over_us = act_us.saturating_sub(req_us);
+
+                let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                SUM_REQ.fetch_add(req_us, Ordering::Relaxed);
+                SUM_ACT.fetch_add(act_us, Ordering::Relaxed);
+                SUM_OVER.fetch_add(over_us, Ordering::Relaxed);
+                MAX_OVER.fetch_max(over_us, Ordering::Relaxed);
+                let hb = match over_us {
+                    0..=99 => 0,
+                    100..=199 => 1,
+                    200..=299 => 2,
+                    300..=499 => 3,
+                    500..=999 => 4,
+                    _ => 5,
+                };
+                HO[hb].fetch_add(1, Ordering::Relaxed);
+
+                if n % 180 == 0 && alvr_server_core::diagnostics_enabled() {
+                    let c = n as f64;
+                    alvr_common::warn!(
+                        "SLEEPACC n={} req_avg={:.3}ms act_avg={:.3}ms | over_avg={:.3}ms over_max={:.3}ms | over_hist(<0.1,0.1-0.2,0.2-0.3,0.3-0.5,0.5-1.0,1.0+ms)={}/{}/{}/{}/{}/{}",
+                        n,
+                        SUM_REQ.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                        SUM_ACT.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                        SUM_OVER.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                        MAX_OVER.load(Ordering::Relaxed) as f64 / 1000.0,
+                        HO[0].load(Ordering::Relaxed),
+                        HO[1].load(Ordering::Relaxed),
+                        HO[2].load(Ordering::Relaxed),
+                        HO[3].load(Ordering::Relaxed),
+                        HO[4].load(Ordering::Relaxed),
+                        HO[5].load(Ordering::Relaxed),
+                    );
+                }
+            }
         } else {
             thread::yield_now();
         }

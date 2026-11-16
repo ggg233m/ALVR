@@ -97,6 +97,13 @@ struct FfiFoveatedEncodingParams {
 };
 
 struct Settings {
+    // Master switch for the high-frequency timing instrumentation. Every diagnostic
+    // probe in this codebase (PRESENTINT, VSYNCWAIT, POSESEL, ENCINPUT, POSEDELTA,
+    // FRAMESPAN, DECWAIT, PUREDEC, ...) is guarded by this flag. It defaults to false
+    // because those probes run on the frame hot path and perturb the timing they
+    // measure. See ExtraConfig::enable_diagnostics in session/src/settings.rs.
+    bool m_enableDiagnostics;
+
     int m_refreshRate;
     unsigned int m_renderWidth;
     unsigned int m_renderHeight;
@@ -137,6 +144,9 @@ struct Settings {
     bool m_forceSwEncoding;
     unsigned int m_swThreadCount;
 
+    unsigned int m_vplTargetUsage;
+    bool m_vplLowPower;
+
     unsigned int m_nvencTuningPreset;
     unsigned int m_nvencMultiPass;
     unsigned int m_nvencAdaptiveQuantizationMode;
@@ -156,6 +166,9 @@ struct Settings {
     bool m_nvencEnableWeightedPrediction;
 
     unsigned long long m_minimumIdrIntervalMs;
+    // Enforced by the server for AV1 because the Intel ARC driver ignores the
+    // encoder's GOP size; 0 disables periodic keyframes.
+    unsigned long long m_idrFrameIntervalMs;
 
     bool m_enableViveTrackerProxy = false;
     bool m_trackingRefOnly = false;
@@ -179,6 +192,10 @@ extern "C" const unsigned char* COMPRESS_AXIS_ALIGNED_CSO_PTR;
 extern "C" unsigned int COMPRESS_AXIS_ALIGNED_CSO_LEN;
 extern "C" const unsigned char* COLOR_CORRECTION_CSO_PTR;
 extern "C" unsigned int COLOR_CORRECTION_CSO_LEN;
+extern "C" const unsigned char* NV12_Y_CSO_PTR;
+extern "C" unsigned int NV12_Y_CSO_LEN;
+extern "C" const unsigned char* NV12_UV_CSO_PTR;
+extern "C" unsigned int NV12_UV_CSO_LEN;
 extern "C" const unsigned char* RGBTOYUV420_CSO_PTR;
 extern "C" unsigned int RGBTOYUV420_CSO_LEN;
 
@@ -202,6 +219,18 @@ extern "C" void LogEncoder(const char* stringPtr);
 extern "C" void LogPeriodically(const char* tag, const char* stringPtr);
 extern "C" void DriverReadyIdle(bool setDefaultChaprone);
 extern "C" void SetVideoConfigNals(const unsigned char* configBuffer, int len, int codec);
+// Frame-trace boundary: the frame reached the encoder. No-op unless diagnostics are on.
+extern "C" void RecordEncoderInput(unsigned long long targetTimestampNs);
+extern "C" void RecordFrameReady(unsigned long long targetTimestampNs);
+extern "C" void RecordSubmitEntry(unsigned long long targetTimestampNs, unsigned long long atUs);
+extern "C" void RecordPresentEntry(unsigned long long targetTimestampNs, unsigned long long atUs);
+extern "C" void RecordPresentExit(unsigned long long targetTimestampNs);
+extern "C" void RecordPostEntry(unsigned long long targetTimestampNs);
+extern "C" void RecordPostExit(unsigned long long targetTimestampNs, unsigned long long cpu100ns);
+extern "C" void RecordSubmitCpu(unsigned long long targetTimestampNs, unsigned long long cpu100ns);
+extern "C" void RecordPresentAbort(unsigned long long targetTimestampNs, unsigned int reason, int hr);
+extern "C" void RecordTransmitReturn(unsigned long long targetTimestampNs);
+extern "C" void RecordEncodeFinished(unsigned long long targetTimestampNs);
 extern "C" void
 VideoSend(unsigned long long targetTimestampNs, unsigned char* buf, int len, bool isIdr);
 extern "C" void
@@ -256,6 +285,11 @@ extern "C" void CaptureFrame();
 void ParseFrameNals(
     int codec, unsigned char* buf, int len, unsigned long long targetTimestampNs, bool isIdr
 );
+// True when this AV1 temporal unit starts with a KEY_FRAME. Used because the
+// encoder can silently ignore a keyframe request, and telling the client that a
+// non-keyframe is an IDR makes it clear its corrupted-stream state on a frame
+// that cannot repair anything.
+bool IsAv1Keyframe(const unsigned char* buf, int len);
 
 // CrashHandler.cpp
 void HookCrashHandler();
