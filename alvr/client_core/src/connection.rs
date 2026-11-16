@@ -67,6 +67,13 @@ pub struct ConnectionContext {
     pub decoder_callback: Mutex<Option<Box<DecoderCallback>>>,
     pub video_frame_metadata_queue: Mutex<VecDeque<(Duration, VideoFrameMetadata)>>,
     pub max_prediction: RwLock<Duration>,
+    /// Mirrors ExtraConfig::enable_diagnostics from the server settings. Guards every
+    /// high-frequency probe on the client (FRAMESPAN, CHAINEND, REPEATGAP, QDEPTH,
+    /// DECWAIT, DECPATH, PUREDEC, NALSHAPE, FETCHTIME, FRAMEINT, ACQUIRE, DECINPUT,
+    /// PTSVAL, PTSCLOCK, BUFDROP, EMPTYFRAME, ...). Those run on the receive, decode and
+    /// render threads, so leaving them on costs CPU on the headset - the device least
+    /// able to spare it. Off by default.
+    pub diagnostics_enabled: RwLock<bool>,
 }
 
 fn set_hud_message(event_queue: &Mutex<VecDeque<ClientCoreEvent>>, message: &str) {
@@ -200,6 +207,8 @@ fn connection_pipeline(
     let negotiated_config = stream_config.negotiated_config;
 
     *ctx.max_prediction.write() = Duration::from_millis(settings.headset.max_prediction_ms);
+    *ctx.diagnostics_enabled.write() = settings.extra.enable_diagnostics;
+    crate::set_diagnostics_enabled(settings.extra.enable_diagnostics);
 
     *ctx.statistics_manager.lock() = Some(StatisticsManager::new(
         settings.connection.statistics_history_size,
@@ -278,27 +287,336 @@ fn connection_pipeline(
         let ctx = Arc::clone(&ctx);
         move || {
             let mut stream_corrupted = true;
+            let mut idr_requested = false;
+            // REVERTED 2026-11-15: separating "decoder saturation" from stream corruption
+            // (waiting for N consecutive drops before requesting an IDR) was measured and
+            // did NOT help. It halved forced keyframes (17.5% -> 8.4%) but PUREDEC got
+            // worse (18.41 -> 22.89 ms), the 40 ms+ share rose (599 -> 631), total latency
+            // stayed at ~139 ms, and corrupted pictures persisted visibly longer because
+            // recovery was deferred. The original immediate-IDR behaviour is restored.
+            // IDR requests must be rate limited in TIME, not by "consecutive drops".
+            //
+            // Background: "Decoder saturation" is the decoder refusing a packet because it
+            // has no free input buffer - the packet itself is fine. The code below still
+            // treats it as stream corruption and requests a keyframe immediately. That
+            // closes a feedback loop measured on device at 500 Mbps:
+            //   saturation -> RequestIdr -> forced I-frame (much larger) -> slower decode
+            //   -> more saturation
+            // Forced keyframes reached 17.5% of all frames while GopPicSize asks for 0.3%,
+            // and PUREDEC degraded 18.4 -> 22.9 -> 33.9 ms as the loop ran away.
+            //
+            // A previous attempt gated this on N CONSECUTIVE drops. It halved keyframes but
+            // made corrupted pictures persist far longer, because recovery was deferred.
+            // Time-based limiting keeps immediate recovery while bounding the request rate:
+            // damage is still repaired on the very next drop, but the client cannot ask for
+            // more than one keyframe per MIN_IDR_INTERVAL.
+            const MIN_IDR_INTERVAL: Duration = Duration::from_millis(500);
+            let mut last_idr_request: Option<Instant> = None;
+
+            let request_idr = |requested: &mut bool, last: &mut Option<Instant>| {
+                if *requested {
+                    return;
+                }
+                if let Some(prev) = *last
+                    && prev.elapsed() < MIN_IDR_INTERVAL
+                {
+                    return;
+                }
+
+                if let Some(sender) = &mut *ctx.control_sender.lock()
+                    && sender.send(&ClientControlPacket::RequestIdr).is_ok()
+                {
+                    *requested = true;
+                    *last = Some(Instant::now());
+                }
+            };
+
             while is_streaming(&ctx) {
+                // TEMPORARY DIAGNOSTIC (actual transfer cost per frame).
+                //
+                // FRAMESPAN showed each frame arrives as ONE packet (pkts_avg=1.0) of
+                // ~626 KB at 450 Mbps, so there is no "last packet of several" to be late -
+                // the whole frame lands in a single recv(). The open question is therefore
+                // how long that recv() takes. If it is a large fraction of the 11.11 ms
+                // frame budget, the transfer itself is what makes frames miss their slot,
+                // which is exactly the "holds then jumps" symptom.
+                //
+                //   recv  - wall time blocked inside video_receiver.recv() until a frame
+                //           is fully available (includes socket wait + 626 KB copy)
+                //   size  - payload size of that frame
+                //   ratio - recv time as a fraction of the frame budget
+                let t_recv0: u64 = {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_micros() as u64)
+                        .unwrap_or(0)
+                };
+
                 let data = match video_receiver.recv(STREAMING_RECV_TIMEOUT) {
                     Ok(data) => data,
                     Err(ConnectionError::TryAgain(_)) => continue,
                     Err(ConnectionError::Other(_)) => return,
                 };
+
+                // Third boundary: the whole packet is off the wire. Paired with the server's
+                // send timestamp this isolates transport delay from local queueing.
+                let trace_pts_ns = data
+                    .get_header()
+                    .ok()
+                    .map(|h| h.timestamp.as_nanos() as u64);
+                if crate::diagnostics_enabled()
+                    && let Some(pts) = trace_pts_ns
+                {
+                    alvr_common::record_received(pts);
+                }
+
+                {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static N: AtomicU64 = AtomicU64::new(0);
+                    static SUM_US: AtomicU64 = AtomicU64::new(0);
+                    static MAX_US: AtomicU64 = AtomicU64::new(0);
+                    static MIN_US: AtomicU64 = AtomicU64::new(u64::MAX);
+                    static SUM_SZ: AtomicU64 = AtomicU64::new(0);
+                    static MAX_SZ: AtomicU64 = AtomicU64::new(0);
+                    static OVER_BUDGET: AtomicU64 = AtomicU64::new(0);
+                    static HR: [AtomicU64; 6] = [
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                    ];
+
+                    let now = {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_micros() as u64)
+                            .unwrap_or(0)
+                    };
+                    let recv_us = now.saturating_sub(t_recv0);
+                    // size is taken from the payload after parsing (see below); use 0 here
+                    // and fill it in via the SZ_ONLY path.
+                    let sz: u64 = 0;
+
+                    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                    SUM_US.fetch_add(recv_us, Ordering::Relaxed);
+                    MAX_US.fetch_max(recv_us, Ordering::Relaxed);
+                    MIN_US.fetch_min(recv_us, Ordering::Relaxed);
+                    SUM_SZ.fetch_add(sz, Ordering::Relaxed);
+                    MAX_SZ.fetch_max(sz, Ordering::Relaxed);
+                    if recv_us > 11111 {
+                        OVER_BUDGET.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let hb = match recv_us {
+                        0..=999 => 0,
+                        1000..=2999 => 1,
+                        3000..=4999 => 2,
+                        5000..=7999 => 3,
+                        8000..=11110 => 4,
+                        _ => 5,
+                    };
+                    HR[hb].fetch_add(1, Ordering::Relaxed);
+
+                    if crate::diagnostics_enabled() && n % 180 == 0 {
+                        let c = n as f64;
+                        alvr_common::warn!(
+                            "RECVCOST n={} recv_avg={:.3}ms recv_max={:.2}ms recv_min={:.3}ms | size_avg={:.1}KB size_max={:.1}KB | over11.1ms={} ({:.2}%) | hist(<1,<3,<5,<8,<11.1,11.1+ms)={}/{}/{}/{}/{}/{}",
+                            n,
+                            SUM_US.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                            MAX_US.load(Ordering::Relaxed) as f64 / 1000.0,
+                            MIN_US.load(Ordering::Relaxed) as f64 / 1000.0,
+                            SUM_SZ.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                            MAX_SZ.load(Ordering::Relaxed) as f64 / 1000.0,
+                            OVER_BUDGET.load(Ordering::Relaxed),
+                            OVER_BUDGET.load(Ordering::Relaxed) as f64 * 100.0 / c,
+                            HR[0].load(Ordering::Relaxed),
+                            HR[1].load(Ordering::Relaxed),
+                            HR[2].load(Ordering::Relaxed),
+                            HR[3].load(Ordering::Relaxed),
+                            HR[4].load(Ordering::Relaxed),
+                            HR[5].load(Ordering::Relaxed),
+                        );
+                    }
+                }
+
                 let Ok((header, nal)) = data.get() else {
                     return;
                 };
+
+                {
+                    // RECVCOST size: recorded here because ReceiverData.buffer is private.
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static SUM_SZ2: AtomicU64 = AtomicU64::new(0);
+                    static MAX_SZ2: AtomicU64 = AtomicU64::new(0);
+                    static SZN: AtomicU64 = AtomicU64::new(0);
+                    let sz = nal.len() as u64;
+                    SUM_SZ2.fetch_add(sz, Ordering::Relaxed);
+                    MAX_SZ2.fetch_max(sz, Ordering::Relaxed);
+                    let sn = SZN.fetch_add(1, Ordering::Relaxed) + 1;
+                    if crate::diagnostics_enabled() && sn % 180 == 0 {
+                        alvr_common::warn!(
+                            "RECVSIZE n={} size_avg={:.1}KB size_max={:.1}KB",
+                            sn,
+                            SUM_SZ2.load(Ordering::Relaxed) as f64 / sn as f64 / 1000.0,
+                            MAX_SZ2.load(Ordering::Relaxed) as f64 / 1000.0,
+                        );
+                    }
+                }
 
                 if let Some(stats) = &mut *ctx.statistics_manager.lock() {
                     stats.report_video_packet_received(header.timestamp);
                 }
 
+                // TEMPORARY DIAGNOSTIC (per-frame transfer completion).
+                //
+                // The hypothesis under test: at 450 Mbps a single frame is ~625 KB spread
+                // over many packets, and even though the AVERAGE NAL interval stays at
+                // 11.14 ms, an individual frame's last packet can arrive after the display
+                // deadline. When that happens the client shows the previous image and then
+                // jumps - exactly the "holds for a beat then jumps" symptom, and exactly
+                // the frequency band where gap>=2f lives.
+                //
+                // For each frame we track the arrival time of its FIRST packet, then when
+                // the timestamp changes we know the previous frame is complete:
+                //   span   - first packet -> last packet of the same frame
+                //   pkts   - packets per frame
+                //   bytes  - payload bytes per frame
+                //   tail   - last packet's arrival relative to the frame's nominal deadline
+                //            (frame_start + period); positive means it finished LATE
+                //
+                // The "tail" histogram is the decisive one: if 450 Mbps shows a long right
+                // tail and 100 Mbps does not, the bitrate/burst hypothesis is confirmed.
+                {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static N: AtomicU64 = AtomicU64::new(0);
+                    static SUM_SPAN_US: AtomicU64 = AtomicU64::new(0);
+                    static MAX_SPAN_US: AtomicU64 = AtomicU64::new(0);
+                    static SUM_PKTS: AtomicU64 = AtomicU64::new(0);
+                    static MAX_PKTS: AtomicU64 = AtomicU64::new(0);
+                    static SUM_BYTES: AtomicU64 = AtomicU64::new(0);
+                    static MAX_BYTES: AtomicU64 = AtomicU64::new(0);
+                    static LATE: AtomicU64 = AtomicU64::new(0);
+                    static HS: [AtomicU64; 5] = [
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                    ];
+                    static HL: [AtomicU64; 6] = [
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                        AtomicU64::new(0),
+                    ];
+
+                    // frame-local state, keyed by the frame timestamp
+                    static CUR_TS: AtomicU64 = AtomicU64::new(0);
+                    static FIRST_US: AtomicU64 = AtomicU64::new(0);
+                    static PKTS: AtomicU64 = AtomicU64::new(0);
+                    static BYTES: AtomicU64 = AtomicU64::new(0);
+
+                    let now_us = {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_micros() as u64)
+                            .unwrap_or(0)
+                    };
+                    let ts = header.timestamp.as_nanos() as u64;
+                    let cur = CUR_TS.load(Ordering::Relaxed);
+
+                    if cur != ts {
+                        // A new frame started: close out the previous one.
+                        if cur != 0 {
+                            let first = FIRST_US.load(Ordering::Relaxed);
+                            let span = now_us.saturating_sub(first);
+                            let pk = PKTS.load(Ordering::Relaxed);
+                            let by = BYTES.load(Ordering::Relaxed);
+                            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+                            SUM_SPAN_US.fetch_add(span, Ordering::Relaxed);
+                            MAX_SPAN_US.fetch_max(span, Ordering::Relaxed);
+                            SUM_PKTS.fetch_add(pk, Ordering::Relaxed);
+                            MAX_PKTS.fetch_max(pk, Ordering::Relaxed);
+                            SUM_BYTES.fetch_add(by, Ordering::Relaxed);
+                            MAX_BYTES.fetch_max(by, Ordering::Relaxed);
+
+                            let sb = match span {
+                                0..=1999 => 0,
+                                2000..=3999 => 1,
+                                4000..=6999 => 2,
+                                7000..=9999 => 3,
+                                _ => 4,
+                            };
+                            HS[sb].fetch_add(1, Ordering::Relaxed);
+
+                            // nominal frame period in us (90 Hz); late = span beyond one period
+                            const PERIOD_US: u64 = 11111;
+                            let lb = if span <= PERIOD_US {
+                                0
+                            } else if span <= PERIOD_US + 2000 {
+                                1
+                            } else if span <= PERIOD_US + 5000 {
+                                2
+                            } else if span <= PERIOD_US + 11000 {
+                                3
+                            } else if span <= PERIOD_US + 22000 {
+                                4
+                            } else {
+                                5
+                            };
+                            HL[lb].fetch_add(1, Ordering::Relaxed);
+                            if span > PERIOD_US {
+                                LATE.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            if crate::diagnostics_enabled() && n % 180 == 0 {
+                                let c = n as f64;
+                                alvr_common::warn!(
+                                    "FRAMESPAN n={} span_avg={:.2}ms span_max={:.2}ms | pkts_avg={:.1} pkts_max={} | kb_avg={:.1} kb_max={:.1} | late={} ({:.2}%) | span_hist(<2,<4,<7,<10,10+ms)={}/{}/{}/{}/{} | tail_hist(<=11.1,<=13.1,<=16.1,<=22.1,<=33.1,33.1+ms)={}/{}/{}/{}/{}/{}",
+                                    n,
+                                    SUM_SPAN_US.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                                    MAX_SPAN_US.load(Ordering::Relaxed) as f64 / 1000.0,
+                                    SUM_PKTS.load(Ordering::Relaxed) as f64 / c,
+                                    MAX_PKTS.load(Ordering::Relaxed),
+                                    SUM_BYTES.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                                    MAX_BYTES.load(Ordering::Relaxed) as f64 / 1000.0,
+                                    LATE.load(Ordering::Relaxed),
+                                    LATE.load(Ordering::Relaxed) as f64 * 100.0 / c,
+                                    HS[0].load(Ordering::Relaxed),
+                                    HS[1].load(Ordering::Relaxed),
+                                    HS[2].load(Ordering::Relaxed),
+                                    HS[3].load(Ordering::Relaxed),
+                                    HS[4].load(Ordering::Relaxed),
+                                    HL[0].load(Ordering::Relaxed),
+                                    HL[1].load(Ordering::Relaxed),
+                                    HL[2].load(Ordering::Relaxed),
+                                    HL[3].load(Ordering::Relaxed),
+                                    HL[4].load(Ordering::Relaxed),
+                                    HL[5].load(Ordering::Relaxed),
+                                );
+                            }
+                        }
+                        CUR_TS.store(ts, Ordering::Relaxed);
+                        FIRST_US.store(now_us, Ordering::Relaxed);
+                        PKTS.store(0, Ordering::Relaxed);
+                        BYTES.store(0, Ordering::Relaxed);
+                    }
+                    PKTS.fetch_add(1, Ordering::Relaxed);
+                    BYTES.fetch_add(nal.len() as u64, Ordering::Relaxed);
+                }
+
                 if header.is_idr {
                     stream_corrupted = false;
+                    idr_requested = false;
                 } else if data.had_packet_loss() {
                     stream_corrupted = true;
-                    if let Some(sender) = &mut *ctx.control_sender.lock() {
-                        sender.send(&ClientControlPacket::RequestIdr).ok();
-                    }
+                    request_idr(&mut idr_requested, &mut last_idr_request);
                     warn!("Network dropped video packet");
                 }
 
@@ -319,6 +637,13 @@ fn connection_pipeline(
                         }
                     }
 
+                    // Fourth boundary: the decoder callback is being entered. The gap from
+                    // `received` is consumer-thread scheduling; what happens inside the
+                    // callback is measured separately by `record_queued`.
+                    if crate::diagnostics_enabled() {
+                        alvr_common::record_callback(header.timestamp.as_nanos() as u64);
+                    }
+
                     let submitted = ctx
                         .decoder_callback
                         .lock()
@@ -327,15 +652,11 @@ fn connection_pipeline(
 
                     if !submitted {
                         stream_corrupted = true;
-                        if let Some(sender) = &mut *ctx.control_sender.lock() {
-                            sender.send(&ClientControlPacket::RequestIdr).ok();
-                        }
+                        request_idr(&mut idr_requested, &mut last_idr_request);
                         warn!("Dropped video packet. Reason: Decoder saturation")
                     }
                 } else {
-                    if let Some(sender) = &mut *ctx.control_sender.lock() {
-                        sender.send(&ClientControlPacket::RequestIdr).ok();
-                    }
+                    request_idr(&mut idr_requested, &mut last_idr_request);
                     warn!("Dropped video packet. Reason: Waiting for IDR frame")
                 }
             }
@@ -565,6 +886,14 @@ fn connection_pipeline(
     wait_rwlock(&disconnect_notif, &mut connection_state_lock);
 
     *connection_state_lock = ConnectionState::Disconnecting;
+
+    // The client's half of the frame trace. Dumped here rather than on the diagnostics
+    // switch because the switch lives in the session settings, which the client only reads
+    // once at connect time - it never sees a mid-session toggle. Connection teardown is the
+    // one moment that always happens, and by then the capture is over.
+    if crate::diagnostics_enabled() {
+        alvr_common::frame_trace::dump(alvr_common::frame_trace::TraceSide::Client);
+    }
 
     *ctx.control_sender.lock() = None;
     *ctx.tracking_sender.lock() = None;

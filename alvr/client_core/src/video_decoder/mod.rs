@@ -13,6 +13,15 @@ pub struct VideoDecoderConfig {
     pub buffering_history_weight: f32,
     pub options: Vec<(String, MediacodecProperty)>,
     pub config_buffer: Vec<u8>,
+    /// Size of one decoded eye view, in pixels.
+    ///
+    /// MediaCodec and the ImageReader need this up front to size their buffers.
+    /// They used to be created with placeholders (512x1024 for the codec, 1x1
+    /// for the reader), which makes the platform rebuild internal buffers once
+    /// the first full-size frame arrives. Measured on device: decode latency
+    /// dropped from 20-25 ms to 14 ms and total latency from 89 ms to 70 ms
+    /// after supplying the real size.
+    pub frame_size: [u32; 2],
 }
 
 pub struct VideoDecoderSink {

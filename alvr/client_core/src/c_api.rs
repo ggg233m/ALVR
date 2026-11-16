@@ -926,6 +926,8 @@ pub extern "C" fn alvr_create_decoder(config: AlvrDecoderConfig) {
         config_buffer: unsafe {
             slice::from_raw_parts(config.config_buffer, config.config_buffer_size as usize).to_vec()
         },
+        // The C API carries no resolution; fall back to the placeholder size.
+        frame_size: [0, 0],
     };
 
     let (mut sink, source) =

@@ -714,6 +714,94 @@ pub fn get_head_data(
         },
     };
 
+    // DIAGNOSTIC (native prediction vs linear extrapolation).
+    //
+    // Quest is deliberately NOT in the branch below, so the pose that reaches the server is
+    // pose(now) + linear_velocity * 23 ms - a pure linear extrapolation using the runtime's
+    // instantaneous velocity. The Pico/Vive/YVR branch instead asks the runtime for the pose
+    // at future_time and back-solves the velocity, which effectively forwards the runtime's
+    // own prediction.
+    //
+    // Whether Quest should take that branch depends on one thing: does the runtime's pose at
+    // future_time differ from pose(now) + v*dt? If the two agree, the runtime is doing plain
+    // linear extrapolation too and switching would change nothing. If they disagree by
+    // millimetres, the runtime has extra information (IMU fusion / acceleration) that we are
+    // currently throwing away.
+    //
+    // PREDCMP reports both, so this can be decided from data rather than assumption.
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        static SUM_DIFF: AtomicU64 = AtomicU64::new(0); // micrometres
+        static MAX_DIFF: AtomicU64 = AtomicU64::new(0);
+        static SUM_EXT: AtomicU64 = AtomicU64::new(0); // |v*dt| micrometres
+        static HIST: [AtomicU64; 6] = [
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+        ];
+
+        let time_offset = future_time.saturating_sub(time);
+        if !time_offset.is_zero()
+            && let Ok(native) = view_reference_space.locate(stage_reference_space, crate::to_xr_time(future_time))
+            && native
+                .location_flags
+                .contains(xr::SpaceLocationFlags::POSITION_VALID)
+        {
+            let dt_s = time_offset.as_secs_f32();
+            let native_pos = crate::from_xr_vec3(native.pose.position);
+            let linear_pos = motion.pose.position + motion.linear_velocity * dt_s;
+
+            // Difference in mm between what the runtime predicts and what we extrapolate.
+            let diff_mm = (native_pos - linear_pos).length() * 1000.0;
+            // Magnitude of the extrapolation itself, so "diff" can be read relative to it.
+            let ext_mm = (motion.linear_velocity * dt_s).length() * 1000.0;
+
+            let diff_um = (diff_mm * 1000.0) as u64;
+            let ext_um = (ext_mm * 1000.0) as u64;
+
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            SUM_DIFF.fetch_add(diff_um, Ordering::Relaxed);
+            SUM_EXT.fetch_add(ext_um, Ordering::Relaxed);
+            MAX_DIFF.fetch_max(diff_um, Ordering::Relaxed);
+            let hb = if diff_mm < 0.05 {
+                0
+            } else if diff_mm < 0.2 {
+                1
+            } else if diff_mm < 0.5 {
+                2
+            } else if diff_mm < 1.0 {
+                3
+            } else if diff_mm < 2.0 {
+                4
+            } else {
+                5
+            };
+            HIST[hb].fetch_add(1, Ordering::Relaxed);
+
+            if alvr_client_core::diagnostics_enabled() && n % 240 == 0 {
+                let c = n as f64;
+                alvr_common::warn!(
+                    "PREDCMP n={} dt={:.1}ms | diff_avg={:.3}mm diff_max={:.3}mm | ext_avg={:.3}mm | hist(<0.05,<0.2,<0.5,<1,<2,2+mm)={}/{}/{}/{}/{}/{}",
+                    n,
+                    dt_s * 1000.0,
+                    SUM_DIFF.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                    MAX_DIFF.load(Ordering::Relaxed) as f64 / 1000.0,
+                    SUM_EXT.load(Ordering::Relaxed) as f64 / c / 1000.0,
+                    HIST[0].load(Ordering::Relaxed),
+                    HIST[1].load(Ordering::Relaxed),
+                    HIST[2].load(Ordering::Relaxed),
+                    HIST[3].load(Ordering::Relaxed),
+                    HIST[4].load(Ordering::Relaxed),
+                    HIST[5].load(Ordering::Relaxed),
+                );
+            }
+        }
+    }
+
     // Some headsets use wrong frame of reference for linear and angular velocities.
     if platform.is_pico() || platform.is_vive() || platform.is_yvr() {
         let xr_future_time = crate::to_xr_time(future_time);

@@ -80,6 +80,13 @@ pub struct VideoFrameMetadata {
     pub foveation_center_shifts: Option<[[f32; 2]; 2]>,
 }
 
+/// Process-wide mirror of ExtraConfig::enable_diagnostics.
+///
+/// The decoder file (video_decoder/android.rs) has no handle on ClientCoreContext, and
+/// threading a flag through every struct it touches would be far more invasive than the
+/// guards are worth. A relaxed atomic load is free enough to sit on the per-frame path.
+pub use alvr_common::{diagnostics_enabled, set_diagnostics_enabled};
+
 pub struct ClientCoreContext {
     platform: Platform,
     lifecycle_state: Arc<RwLock<LifecycleState>>,
@@ -242,6 +249,11 @@ impl ClientCoreContext {
                 .send(&ClientControlPacket::ProximityState(headset_is_worn))
                 .ok();
         }
+    }
+
+    /// Cheap read of the diagnostics switch, for hot-path guards on the client.
+    pub fn diagnostics_enabled(&self) -> bool {
+        *self.connection_context.diagnostics_enabled.read()
     }
 
     pub fn get_total_prediction_offset(&self) -> Duration {
