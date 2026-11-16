@@ -115,7 +115,9 @@ impl StreamRenderer {
         let mut constants = vec![];
 
         constants.extend([
-            ("ENABLE_SRGB_CORRECTION", enable_srgb_correction.into()),
+            // 0/1 rather than a bool: see the note in stream.wgsl - the GLES
+            // backend panics on Bool uniforms.
+            ("ENABLE_SRGB_CORRECTION", u32::from(enable_srgb_correction).into()),
             ("ENCODING_GAMMA", encoding_gamma.into()),
         ]);
 
@@ -132,7 +134,7 @@ impl StreamRenderer {
                 )
             };
 
-        constants.push(("ENABLE_FFE", foveated_encoding.is_some().into()));
+        constants.push(("ENABLE_FFE", u32::from(foveated_encoding.is_some()).into()));
 
         let foveation_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("stream foveation uniforms"),
@@ -152,10 +154,10 @@ impl StreamRenderer {
 
         if let Some(upscaling) = upscaling {
             constants.extend([
-                ("ENABLE_UPSCALING", true.into()),
+                ("ENABLE_UPSCALING", 1u32.into()),
                 (
                     "UPSCALE_USE_EDGE_DIRECTION",
-                    upscaling.edge_direction.into(),
+                    u32::from(upscaling.edge_direction).into(),
                 ),
                 (
                     "UPSCALE_EDGE_THRESHOLD",
