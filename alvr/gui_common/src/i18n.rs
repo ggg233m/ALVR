@@ -53,7 +53,7 @@ Windows 上的 Intel GPU 使用 oneVPL 后端，该后端完全不读取此值�
     ("Expedited forwarding", "加速转发（EF）"),
     ("Delay in seconds to wait after booting the headset before trying to launch the client.", "头显启动后，尝试启动客户端前等待的秒数。"),
     ("Dimensional resolution multiplier, high values will cause performance issues with weaker headset hardware or higher resolutions", "分辨率的维度倍率，数值过高会在头显硬件性能较弱或分辨率较高时引发性能问题"),
-    ("Disabling foveated encoding may result in significantly higher encode/decode times and stuttering, or even crashing.\nIf you want to reduce the amount of pixelation on the edges, increase the center region width and height", "禁用注视点编码可能导致编码/解码耗时显著增加并出现卡顿，甚至崩溃。\n若想减少边缘像素化，请增大中心区域的宽度和高度"),
+    ("Disabling foveated encoding may result in significantly higher encode/decode times and stuttering, or even crashing.\nIf you want to reduce the amount of pixelation on the edges, increase the center region width and height.\nFor eye-tracked foveation, enable Headset > Face tracking > Sink > Eye-tracked foveated encoding.", "禁用注视点编码可能导致编码/解码耗时显著增加并出现卡顿，甚至崩溃。\n若想减少边缘像素化，请增大中心区域的宽度和高度。\n如需眼动追踪注视点编码，请启用 头显 > 面部追踪 > Sink > 眼动追踪注视点编码。"),
     ("Duration", "持续时间"),
     ("Enable HDR", "启用 HDR"),
     ("Enabling this allows using hand gestures to emulate controller inputs.", "启用后可用手势模拟手柄输入。"),
