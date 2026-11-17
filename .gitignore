@@ -73,3 +73,7 @@ CMakeLists.txt
 cmake-build-debug/
 
 *.jks
+
+# local diagnostics artifacts (never commit: perfetto traces, ETLs, session logs, backups)
+_diag/
+_shake_backup/
