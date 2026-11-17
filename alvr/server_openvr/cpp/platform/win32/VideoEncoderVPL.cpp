@@ -828,8 +828,53 @@ void VideoEncoderVPL::InitVplEncode() {
         unsigned(m_vplEncodeParams.AsyncDepth)
     );
 
-    const mfxStatus sts
-        = MFXVideoENCODE_Query(m_vplSession, &m_vplEncodeParams, &m_vplEncodeParams);
+        // Query is advisory: it validates and auto-corrects, but Init is the gate that
+    // actually decides. This Arc driver sometimes refuses the whole query with
+    // MFX_ERR_UNSUPPORTED instead of correcting fields. Measured matrix, driver
+    // 32.0.101.9150 on an A770, all with NV12 fourCC and everything else equal:
+    //   HEVC profile=Main10 + TU=4 + lowPower=OFF -> ERR_UNSUPPORTED (4 runs)
+    //   HEVC profile=UNKNOWN + TU=4 + lowPower=OFF -> ERR_NONE
+    //   AV1 profile=Main    + TU=7 + lowPower=OFF -> ERR_NONE (driver rewrote
+    //                                                lowPower OFF->ON itself)
+    // The discriminator was the Main10-profile-on-NV12 contradiction, NOT the
+    // target usage: TU=4 and TU=7 both appear in passing and failing runs. The
+    // fallback chain below therefore starts with that contradiction, and only
+    // then tries the values verified to pass.
+    mfxStatus sts = MFXVideoENCODE_Query(m_vplSession, &m_vplEncodeParams, &m_vplEncodeParams);
+    for (int retry = 0;
+         (sts == MFX_ERR_UNSUPPORTED || sts == MFX_ERR_MEMORY_ALLOC) && retry < 3;
+         retry++) {
+        if (retry == 0 && m_vplCodecProfile == MFX_PROFILE_HEVC_MAIN10
+            && m_vplColorFormat == MFX_FOURCC_NV12) {
+            // First fallback, and the one that actually fires in the field:
+            // Main10 declared on an NV12 import surface is contradictory (NV12
+            // is 8-bit 4:2:0). This Arc driver refuses the combination outright
+            // with MFX_ERR_UNSUPPORTED instead of correcting it (measured four
+            // times: "HEVC profile=0x2 fourCC=NV12" -> unsupported; profile=0x0
+            // with everything else identical -> accepted). FrameRender currently
+            // always converts to NV12 when HDR is off, so a 10-bit request can
+            // only be honoured by the HDR (P010) pipeline. Degrade to the
+            // driver-chosen profile, warn loudly, and keep the session alive.
+            VPL_WARN(
+                "10-bit HEVC without HDR is not supported by this driver "
+                "(Main10 profile on an NV12 surface). Falling back to 8-bit; "
+                "enable HDR for a true 10-bit pipeline"
+            );
+            m_vplCodecProfile = MFX_PROFILE_UNKNOWN;
+        } else if (retry <= 1 && m_vplQualityPreset != MFX_TARGETUSAGE_BEST_SPEED) {
+            // Second fallback: TU=7 passed on every run it was requested.
+            VPL_WARN("query rejected params, retrying with TargetUsage = best speed");
+            m_vplQualityPreset = MFX_TARGETUSAGE_BEST_SPEED;
+        } else if (m_vplLowPower != MFX_CODINGOPTION_ON) {
+            // Third fallback: DG2 only ships VDEnc, the driver forces lowPower ON
+            // anyway (measured). Ask for what it will pick regardless of TU.
+            VPL_WARN("query still rejected, retrying with lowPower = on");
+            m_vplLowPower = MFX_CODINGOPTION_ON;
+        } else {
+            break;
+        }
+        sts = MFXVideoENCODE_Query(m_vplSession, &m_vplEncodeParams, &m_vplEncodeParams);
+    }
     switch (sts) {
     case MFX_ERR_NONE:
     case MFX_WRN_INCOMPATIBLE_VIDEO_PARAM:
@@ -842,7 +887,7 @@ void VideoEncoderVPL::InitVplEncode() {
         break;
 
     case MFX_ERR_UNSUPPORTED:
-        ERROR_THROW("query unsupported");
+        ERROR_THROW("query unsupported (also failed with best-speed and lowPower=on fallbacks)");
 
     default:
         ERROR_THROW("query failed with %d", sts);
