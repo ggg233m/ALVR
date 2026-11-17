@@ -24,6 +24,10 @@ pub fn prepare_x264_windows(deps_path: &Path) {
     const REVISION: usize = 3086;
 
     let destination = deps_path.join("x264");
+    if destination.exists() {
+        println!("x264 already present, skipping download");
+        return;
+    }
 
     command::download_and_extract_zip(
         &format!(
@@ -58,6 +62,10 @@ Cflags: -I${{includedir}}
 }
 
 pub fn prepare_ffmpeg_windows(deps_path: &Path) {
+    if deps_path.join("ffmpeg").exists() {
+        println!("ffmpeg already present, skipping download");
+        return;
+    }
     command::download_and_extract_zip(
         &format!(
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/{}",
@@ -78,6 +86,11 @@ fn prepare_libvpl_windows(deps_path: &Path) {
     let sh = Shell::new().unwrap();
 
     const VERSION: &str = "2.15.0";
+
+    if deps_path.join("libvpl/alvr_build").exists() {
+        println!("libvpl already present, skipping download and build");
+        return;
+    }
 
     command::download_and_extract_zip(
         &format!("https://github.com/intel/libvpl/archive/refs/tags/v{VERSION}.zip"),
@@ -173,6 +186,11 @@ pub fn prepare_vulkan_headers(deps_path: &Path) {
 
     let dest = deps_path.join("vulkan-headers");
     let include_dir = dest.join("include");
+
+    if include_dir.join("vulkan/vulkan.h").exists() {
+        println!("vulkan-headers already present, skipping download");
+        return;
+    }
 
     command::download_and_extract_zip(
         &format!("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v{VERSION}.zip"),
