@@ -33,6 +33,7 @@ pub struct SettingsTab {
     microphone_preset: PresetControl,
     hand_tracking_interaction_preset: PresetControl,
     eye_face_tracking_preset: PresetControl,
+    quest3_intel_preset: PresetControl,
     top_level_entries: Vec<TopLevelEntry>,
     session_settings_json: Option<json::Value>,
     /// Latest settings, used by the derived-resolution readout.
@@ -85,6 +86,7 @@ impl SettingsTab {
                 builtin_schema::hand_tracking_interaction_schema(),
             ),
             eye_face_tracking_preset: PresetControl::new(builtin_schema::eye_face_tracking_schema()),
+            quest3_intel_preset: PresetControl::new(builtin_schema::quest3_intel_schema()),
             top_level_entries,
             session_settings_json: None,
             current_settings: None,
@@ -206,6 +208,9 @@ impl SettingsTab {
                             ui.end_row();
 
                             path_value_pairs.extend(self.eye_face_tracking_preset.ui(ui));
+                            ui.end_row();
+
+                            path_value_pairs.extend(self.quest3_intel_preset.ui(ui));
                             ui.end_row();
                         })
                 });

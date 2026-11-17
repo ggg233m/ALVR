@@ -498,3 +498,84 @@ pub fn eye_face_tracking_schema() -> PresetSchemaNode {
         gui: ChoiceControlType::ButtonGroup,
     })
 }
+
+pub fn quest3_intel_schema() -> PresetSchemaNode {
+    PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
+        name: "Quest 3 + Intel GPU preset".into(),
+        strings: [(
+            "help".into(),
+            "Settings verified on Quest 3 wired to an Arc A770 at 90 Hz. Applies: HEVC, TCP, bitrate, 10-bit, resolution 2300 wide, foveation, encoder GOP/VBV, decoder low-latency options, controller and performance hints. Values are sensible starting points, not universal defaults; tune bitrate and resolution to your link.".into(),
+        )]
+        .into_iter()
+        .collect(),
+        flags: ["steamvr-restart".into()].into_iter().collect(),
+        options: [HigherOrderChoiceOption {
+            display_name: "Apply".into(),
+            modifiers: vec![
+                // stream basics
+                string_modifier("session_settings.video.preferred_codec.variant", "Hevc"),
+                string_modifier("session_settings.connection.stream_protocol.variant", "Tcp"),
+                num_modifier("session_settings.video.bitrate.mode.ConstantMbps", "210"),
+                num_modifier("session_settings.video.preferred_fps", "90"),
+                bool_modifier("session_settings.video.encoder_config.use_10bit.set", true),
+                bool_modifier("session_settings.video.encoder_config.use_10bit.content", true),
+                // resolution: 2300 wide, height auto (Quest 3 panel 2064x2208)
+                string_modifier("session_settings.video.transcoding_view_resolution.variant", "Absolute"),
+                num_modifier("session_settings.video.transcoding_view_resolution.Absolute.width", "2300"),
+                bool_modifier("session_settings.video.transcoding_view_resolution.Absolute.height.set", false),
+                string_modifier("session_settings.video.emulated_headset_view_resolution.variant", "Absolute"),
+                num_modifier("session_settings.video.emulated_headset_view_resolution.Absolute.width", "2300"),
+                bool_modifier("session_settings.video.emulated_headset_view_resolution.Absolute.height.set", false),
+                // foveation (widened center vs upstream High preset)
+                bool_modifier("session_settings.video.foveated_encoding.enabled", true),
+                num_modifier("session_settings.video.foveated_encoding.content.center_size.content[0]", "0.6"),
+                num_modifier("session_settings.video.foveated_encoding.content.center_size.content[1]", "0.6"),
+                num_modifier("session_settings.video.foveated_encoding.content.edge_ratio.content[0]", "4"),
+                num_modifier("session_settings.video.foveated_encoding.content.edge_ratio.content[1]", "5"),
+                // Intel VPL encoder cadence
+                num_modifier("session_settings.video.encoder_config.vpl.gop_frames", "900"),
+                num_modifier("session_settings.video.encoder_config.vpl.vbv_frames", "1"),
+                num_modifier("session_settings.video.encoder_config.vpl.idr_frame_interval_ms", "0"),
+                // network: DSCP ExpeditedForwarding (EF, DSCP 46)
+                bool_modifier("session_settings.connection.dscp.set", true),
+                string_modifier(
+                    "session_settings.connection.dscp.content.variant",
+                    "ExpeditedForwarding",
+                ),
+                // Quest 3 decoder: low-latency Mediacodec options
+                {
+                    let opts = serde_json::json!([
+                        ["operating-rate", {"ty": {"variant": "Int32"}, "value": "2147483647"}],
+                        ["priority", {"ty": {"variant": "Int32"}, "value": "0"}],
+                        ["vendor.qti-ext-dec-low-latency.enable", {"ty": {"variant": "Int32"}, "value": "1"}]
+                    ]);
+                    PresetModifier {
+                        target_path: "session_settings.video.mediacodec_extra_options.content".into(),
+                        operation: PresetModifierOperation::Assign(opts),
+                    }
+                },
+                // headset hints
+                string_modifier(
+                    "session_settings.headset.controllers.content.emulation_mode.variant",
+                    "Quest3Plus",
+                ),
+                bool_modifier("session_settings.headset.multimodal_tracking.enabled", true),
+                string_modifier(
+                    "session_settings.headset.performance_level.cpu.content.variant",
+                    "SustainedHigh",
+                ),
+                bool_modifier("session_settings.headset.performance_level.cpu.enabled", true),
+                string_modifier(
+                    "session_settings.headset.performance_level.gpu.content.variant",
+                    "SustainedHigh",
+                ),
+                bool_modifier("session_settings.headset.performance_level.gpu.enabled", true),
+            ],
+            content: None,
+        }]
+        .into_iter()
+        .collect(),
+        default_option_display_name: "Apply".into(),
+        gui: ChoiceControlType::ButtonGroup,
+    })
+}
