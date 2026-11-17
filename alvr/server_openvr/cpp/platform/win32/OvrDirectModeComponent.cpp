@@ -1027,7 +1027,8 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         // Access to shared texture must be wrapped in AcquireSync/ReleaseSync
         // to ensure the compositor has finished rendering to it before it gets used.
         // This enforces scheduling of work on the gpu between processes.
-        if (SUCCEEDED(pSyncTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&pKeyedMutex)
+        if (SUCCEEDED(
+                pSyncTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&pKeyedMutex)
             )) {
             // TODO: Reasonable timeout and timeout handling
             const uint64_t t_acq0 = GetTimestampUs();

@@ -96,6 +96,11 @@ struct FfiFoveatedEncodingParams {
     float edgeRatio[2];
 };
 
+struct FfiFoveationCenters {
+    bool valid;
+    float centerShifts[2][2];
+};
+
 struct Settings {
     // Master switch for the high-frequency timing instrumentation. Every diagnostic
     // probe in this codebase (PRESENTINT, VSYNCWAIT, POSESEL, ENCINPUT, POSEDELTA,
@@ -246,6 +251,7 @@ extern "C" unsigned long long PathStringToHash(const char* path);
 extern "C" void ReportPresent(unsigned long long timestamp_ns, unsigned long long offset_ns);
 extern "C" void ReportComposed(unsigned long long timestamp_ns, unsigned long long offset_ns);
 extern "C" FfiDynamicEncoderParams GetDynamicEncoderParams();
+extern "C" FfiFoveationCenters GetEyeTrackedFoveationCenters(unsigned long long targetTimestampNs);
 extern "C" void ReportEncoderFoveationCenters(
     unsigned long long targetTimestampNs, float leftX, float leftY, float rightX, float rightY
 );
