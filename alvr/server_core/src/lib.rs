@@ -332,6 +332,10 @@ impl ServerCoreContext {
             {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);
+                static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                    N.store(0, Ordering::Relaxed);
+                }
                 let n = N.fetch_add(1, Ordering::Relaxed) + 1;
                 if n <= 3 || n % 900 == 0 {
                     warn!("延迟过高，正在限制预测值 (第 {n} 次)");

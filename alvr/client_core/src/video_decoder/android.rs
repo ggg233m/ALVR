@@ -121,6 +121,22 @@ impl VideoDecoderSink {
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ];
+            static SEEN_EPOCH_0: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH_0) {
+                N.store(0, Ordering::Relaxed);
+                FAIL.store(0, Ordering::Relaxed);
+                SUM_WAIT_US.store(0, Ordering::Relaxed);
+                MAX_WAIT_US.store(0, Ordering::Relaxed);
+                SUM_GAP_US.store(0, Ordering::Relaxed);
+                MAX_GAP_US.store(0, Ordering::Relaxed);
+                PREV_TS_NS.store(0, Ordering::Relaxed);
+                for slot in HG.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+                for slot in HW.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+            }
 
             let t0 = {
                 use std::time::{SystemTime, UNIX_EPOCH};
@@ -247,6 +263,19 @@ impl VideoDecoderSink {
                     static SUM_NALS: AtomicU64 = AtomicU64::new(0);
                     static MAX_NALS: AtomicU64 = AtomicU64::new(0);
                     static SUM_SLICES: AtomicU64 = AtomicU64::new(0);
+                    static SEEN_EPOCH_1: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_1) {
+                        LAST_TS.store(0, Ordering::Relaxed);
+                        CUR_BYTES.store(0, Ordering::Relaxed);
+                        CUR_NALS.store(0, Ordering::Relaxed);
+                        CUR_SLICES.store(0, Ordering::Relaxed);
+                        FN.store(0, Ordering::Relaxed);
+                        SUM_BYTES.store(0, Ordering::Relaxed);
+                        MAX_BYTES.store(0, Ordering::Relaxed);
+                        SUM_NALS.store(0, Ordering::Relaxed);
+                        MAX_NALS.store(0, Ordering::Relaxed);
+                        SUM_SLICES.store(0, Ordering::Relaxed);
+                    }
 
                     // NAL unit type: HEVC header is 2 bytes, type in bits 1..6 of byte 0.
                     let nal_type = data.first().map(|b| (b >> 1) & 0x3F).unwrap_or(0xFF);
@@ -418,6 +447,15 @@ impl VideoDecoderSource {
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ];
+            static SEEN_EPOCH_2: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH_2) {
+                DN.store(0, Ordering::Relaxed);
+                SUM_DEPTH.store(0, Ordering::Relaxed);
+                MAX_DEPTH.store(0, Ordering::Relaxed);
+                for slot in HD.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+            }
             let d = image_queue_lock.len() as u64;
             SUM_DEPTH.fetch_add(d, Ordering::Relaxed);
             MAX_DEPTH.fetch_max(d, Ordering::Relaxed);
@@ -651,6 +689,21 @@ fn decoder_lifecycle(
                     AtomicU64::new(0),
                     AtomicU64::new(0),
                 ];
+                static SEEN_EPOCH_3: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH_3) {
+                    AN.store(0, Ordering::Relaxed);
+                    SUM_WAIT.store(0, Ordering::Relaxed);
+                    MAX_WAIT.store(0, Ordering::Relaxed);
+                    BLOCKED.store(0, Ordering::Relaxed);
+                    SUM_QLEN.store(0, Ordering::Relaxed);
+                    MAX_QLEN.store(0, Ordering::Relaxed);
+                    for slot in HA.iter() {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                    for slot in HQ.iter() {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                }
 
                 let now = {
                     use std::time::{SystemTime, UNIX_EPOCH};
@@ -736,6 +789,16 @@ fn decoder_lifecycle(
                             AtomicU64::new(0),
                             AtomicU64::new(0),
                         ];
+                        static SEEN_EPOCH_4: AtomicU64 = AtomicU64::new(0);
+                        if alvr_common::new_probe_session(&SEEN_EPOCH_4) {
+                            LN.store(0, Ordering::Relaxed);
+                            SUM_L.store(0, Ordering::Relaxed);
+                            MAX_L.store(0, Ordering::Relaxed);
+                            UNMATCHED.store(0, Ordering::Relaxed);
+                            for slot in HL.iter() {
+                                slot.store(0, Ordering::Relaxed);
+                            }
+                        }
                         let now_us = {
                             use std::time::{SystemTime, UNIX_EPOCH};
                             SystemTime::now()
@@ -826,6 +889,10 @@ fn decoder_lifecycle(
                         // whether the values ever lined up (a late-joining mismatch and a
                         // never-matching one look identical at low resolution).
                         static PRINTED: AtomicU64 = AtomicU64::new(0);
+                        static SEEN_EPOCH_5: AtomicU64 = AtomicU64::new(0);
+                        if alvr_common::new_probe_session(&SEEN_EPOCH_5) {
+                            PRINTED.store(0, Ordering::Relaxed);
+                        }
                         let p = PRINTED.fetch_add(1, Ordering::Relaxed) + 1;
                         if crate::diagnostics_enabled() && (p <= 6 || p % 180 == 0) {
                             let (smin, smax, slen) = {
@@ -1000,6 +1067,21 @@ fn decoder_lifecycle(
             AtomicU64::new(0),
             AtomicU64::new(0),
         ];
+        static SEEN_EPOCH_6: AtomicU64 = AtomicU64::new(0);
+        if alvr_common::new_probe_session(&SEEN_EPOCH_6) {
+            N.store(0, Ordering::Relaxed);
+            SUM_POLL_US.store(0, Ordering::Relaxed);
+            MAX_POLL_US.store(0, Ordering::Relaxed);
+            SUM_REL_US.store(0, Ordering::Relaxed);
+            MAX_REL_US.store(0, Ordering::Relaxed);
+            SPINS.store(0, Ordering::Relaxed);
+            for slot in H_POLL.iter() {
+                slot.store(0, Ordering::Relaxed);
+            }
+            for slot in H_REL.iter() {
+                slot.store(0, Ordering::Relaxed);
+            }
+        }
 
         fn bucket(us: u64) -> usize {
             match us {
@@ -1071,6 +1153,16 @@ fn decoder_lifecycle(
                         AtomicU64::new(0),
                         AtomicU64::new(0),
                     ];
+                    static SEEN_EPOCH_7: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_7) {
+                        PN.store(0, Ordering::Relaxed);
+                        SUM_PURE.store(0, Ordering::Relaxed);
+                        MAX_PURE.store(0, Ordering::Relaxed);
+                        MIN_PURE.store(u64::MAX, Ordering::Relaxed);
+                        for slot in HP.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                    }
 
                     let submit_us = if crate::diagnostics_enabled() {
                         let mut m = IN_TIME.lock();
@@ -1112,9 +1204,17 @@ fn decoder_lifecycle(
                         // they are large frames, keyframes, or arrive after a gap.
                         if pure_us > 40000 {
                             static SN: AtomicU64 = AtomicU64::new(0);
+                            static SEEN_EPOCH_8: AtomicU64 = AtomicU64::new(0);
+                            if alvr_common::new_probe_session(&SEEN_EPOCH_8) {
+                                SN.store(0, Ordering::Relaxed);
+                            }
                             let sn = SN.fetch_add(1, Ordering::Relaxed) + 1;
                             if crate::diagnostics_enabled() && sn <= 200 {
                                 static PREV_PTS: AtomicU64 = AtomicU64::new(0);
+                                static SEEN_EPOCH_9: AtomicU64 = AtomicU64::new(0);
+                                if alvr_common::new_probe_session(&SEEN_EPOCH_9) {
+                                    PREV_PTS.store(0, Ordering::Relaxed);
+                                }
                                 let prev = PREV_PTS.swap(presentation_time_ns as u64, Ordering::Relaxed);
                                 let dpts_us = if prev == 0 {
                                     -1i64
@@ -1178,6 +1278,16 @@ fn decoder_lifecycle(
                         AtomicU64::new(0),
                         AtomicU64::new(0),
                     ];
+                    static SEEN_EPOCH_10: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_10) {
+                        CN.store(0, Ordering::Relaxed);
+                        SUM_DIFF.store(0, Ordering::Relaxed);
+                        MIN_DIFF.store(u64::MAX, Ordering::Relaxed);
+                        MAX_DIFF.store(0, Ordering::Relaxed);
+                        for slot in HD.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                    }
 
                     // Establish the offset between the frame PTS and a monotonic baseline.
                     // libc is not a dependency here, so instead of CLOCK_MONOTONIC we take
@@ -1250,6 +1360,10 @@ fn decoder_lifecycle(
                 });
                 if immediate {
                     static LOGGED: AtomicU64 = AtomicU64::new(0);
+                    static SEEN_EPOCH_11: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_11) {
+                        LOGGED.store(0, Ordering::Relaxed);
+                    }
                     if LOGGED.fetch_add(1, Ordering::Relaxed) == 0 {
                         alvr_common::warn!("RELEASEMODE = immediate (no timestamp)");
                     }
@@ -1308,6 +1422,17 @@ fn decoder_lifecycle(
                         AtomicU64::new(0),
                         AtomicU64::new(0),
                     ];
+                    static SEEN_EPOCH_12: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_12) {
+                        SUM_WAIT_US.store(0, Ordering::Relaxed);
+                        MAX_WAIT_US.store(0, Ordering::Relaxed);
+                        SUM_SPIN_US.store(0, Ordering::Relaxed);
+                        MAX_SPIN_US.store(0, Ordering::Relaxed);
+                        SUM_SPIN_CNT.store(0, Ordering::Relaxed);
+                        for slot in HW.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                    }
                     SUM_WAIT_US.fetch_add(frame_wait_us, Ordering::Relaxed);
                     MAX_WAIT_US.fetch_max(frame_wait_us, Ordering::Relaxed);
                     SUM_SPIN_US.fetch_add(spin_acc_us, Ordering::Relaxed);

@@ -743,6 +743,14 @@ pub fn get_head_data(
             AtomicU64::new(0),
             AtomicU64::new(0),
         ];
+        static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+        if alvr_common::new_probe_session(&SEEN_EPOCH) {
+            N.store(0, Ordering::Relaxed);
+            MAX_DIFF.store(0, Ordering::Relaxed);
+            for slot in HIST.iter() {
+                slot.store(0, Ordering::Relaxed);
+            }
+        }
 
         let time_offset = future_time.saturating_sub(time);
         if !time_offset.is_zero()

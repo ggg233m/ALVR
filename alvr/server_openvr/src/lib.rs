@@ -696,6 +696,11 @@ extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_id
                 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
                 static HIT: AtomicU64 = AtomicU64::new(0);
                 static MISS: AtomicU64 = AtomicU64::new(0);
+                static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                    HIT.store(0, Ordering::Relaxed);
+                    MISS.store(0, Ordering::Relaxed);
+                }
                 static LAST_NEAREST: AtomicI64 = AtomicI64::new(0);
                 MISS.fetch_add(1, Ordering::Relaxed);
                 LAST_NEAREST.store(pose_lookup.1, Ordering::Relaxed);
@@ -733,6 +738,17 @@ extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_id
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ];
+            static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                HIT.store(0, Ordering::Relaxed);
+                N.store(0, Ordering::Relaxed);
+                SUM_STALE.store(0, Ordering::Relaxed);
+                MAX_STALE.store(0, Ordering::Relaxed);
+                NONZERO.store(0, Ordering::Relaxed);
+                for slot in HIST.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+            }
 
             let h = HIT.fetch_add(1, Ordering::Relaxed) + 1;
             let n = N.fetch_add(1, Ordering::Relaxed) + 1;
@@ -887,6 +903,16 @@ extern "C" fn wait_for_vsync() {
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ];
+            static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                N.store(0, Ordering::Relaxed);
+                SUM.store(0, Ordering::Relaxed);
+                MAX.store(0, Ordering::Relaxed);
+                MIN.store(u64::MAX, Ordering::Relaxed);
+                for slot in BUCKET.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+            }
 
             let us = duration.as_micros() as u64;
             let n = N.fetch_add(1, Ordering::Relaxed) + 1;
@@ -947,6 +973,17 @@ extern "C" fn wait_for_vsync() {
                     AtomicU64::new(0),
                     AtomicU64::new(0),
                 ];
+                static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                    N.store(0, Ordering::Relaxed);
+                    SUM_REQ.store(0, Ordering::Relaxed);
+                    SUM_ACT.store(0, Ordering::Relaxed);
+                    MAX_OVER.store(0, Ordering::Relaxed);
+                    SUM_OVER.store(0, Ordering::Relaxed);
+                    for slot in HO.iter() {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                }
 
                 // Measured from t_request (taken before the grid lookup), so this is the
                 // whole interval from "ask how long to wait" to "sleep finished".

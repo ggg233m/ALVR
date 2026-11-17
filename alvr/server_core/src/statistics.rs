@@ -134,6 +134,11 @@ impl StatisticsManager {
             use std::sync::atomic::{AtomicU64, Ordering};
             static HIT: AtomicU64 = AtomicU64::new(0);
             static MISS: AtomicU64 = AtomicU64::new(0);
+            static SEEN_EPOCH_0: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH_0) {
+                HIT.store(0, Ordering::Relaxed);
+                MISS.store(0, Ordering::Relaxed);
+            }
             let found = self
                 .history_buffer
                 .iter()
@@ -200,6 +205,19 @@ impl StatisticsManager {
                     AtomicU64::new(0),
                     AtomicU64::new(0),
                 ];
+                static SEEN_EPOCH_1: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH_1) {
+                    N.store(0, Ordering::Relaxed);
+                    SUM.store(0, Ordering::Relaxed);
+                    MIN.store(u64::MAX, Ordering::Relaxed);
+                    MAX.store(0, Ordering::Relaxed);
+                    SUM_D.store(0, Ordering::Relaxed);
+                    MAX_D.store(0, Ordering::Relaxed);
+                    PREV.store(u64::MAX, Ordering::Relaxed);
+                    for slot in HIST.iter() {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                }
 
                 let us = self.last_frame_present_interval.as_micros() as u64;
                 let n = N.fetch_add(1, Ordering::Relaxed) + 1;

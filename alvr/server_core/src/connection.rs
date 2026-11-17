@@ -1475,6 +1475,11 @@ fn connection_pipeline(
         ClientConnectionsAction::SetConnectionState(ConnectionState::Streaming),
     );
 
+    // New streaming session: diagnostic probes zero their counters on their next call.
+    // They are block-local statics that live as long as the process, so the server would
+    // otherwise carry maxima across reconnects and across settings changes.
+    alvr_common::bump_probe_epoch();
+
     ctx.events_sender
         .send(ServerCoreEvent::ClientConnected(
             ServerNegotiatedStreamingConfig {

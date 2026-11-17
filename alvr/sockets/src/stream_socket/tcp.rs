@@ -124,27 +124,42 @@ pub struct MultiplexedTcpReader {
     // Read-ahead buffer.
     //
     // Unlike UDP, the TCP writer does NOT shard: one video frame is one logical packet of
-    // ~350 KB, written with a single write_all (see MultiplexedTcpWriter::send). The cost
-    // this buffer removes is on the READ side, where the old code did two syscalls per
-    // logical packet - a peek() for the 10-byte prefix (looping until all 10 bytes were
-    // there) and then one or more recv() calls to pull the payload in, however many the
-    // kernel chose to hand over at once.
+    // ~300 KB, written with a single write_all (see MultiplexedTcpWriter::send).
     //
-    // Pulling the bytes into this buffer with a single large read() per frame instead of
-    // 1 + N small ones measurably reduced frame arrival jitter: decoder input interval
-    // standard deviation fell 2.84 -> 2.55 ms and the content-to-vsync offset wobble
-    // (CHAINEND delta_avg) fell 0.78 -> 0.49 ms, which is what the translational judder
-    // was tracking. It matters for wireless exactly as much as for wired; only the link
-    // differs, not the syscall pattern.
+    // What this buffer actually buys, measured by the READSIZE probe below (11 sessions,
+    // 198-235 Mbps): on the client video stream the kernel returns 51-61 KB per read() no
+    // matter how much is asked for, so a ~300 KB frame still arrives in ~5 reads. A 512 KB
+    // request does NOT make it one read per frame. The delivered chunk is set by Windows
+    // Receive Window Auto-Tuning: raising the requested receive buffer from the 64 KB
+    // default to i32::MAX left the average chunk at 60.3 KB (from 60.6 KB), i.e. unchanged.
+    // (The same probe on the server's control socket reports 1.4-2.3 KB, which is correct
+    // for small control packets and says nothing about the video path.)
+    //
+    // So the saving is 1 syscall, not N. The old path did recv(MSG_PEEK) into a 10-byte
+    // buffer to learn the prefix, then the same ~5 recv() calls for the payload: ~6 per
+    // frame -> ~5. The peek itself was not a spin (the socket has a read timeout, so it
+    // blocks; and because ~60 KB is already queued it normally returns all 10 bytes on the
+    // first call) - it was one extra syscall, and a second read of the same 10 bytes.
+    //
+    // Do not attribute a jitter improvement to this. An earlier version of this comment
+    // claimed "one read() per frame" and cited a standard-deviation drop of 2.84 -> 2.55 ms
+    // plus a CHAINEND delta_avg drop of 0.78 -> 0.49 ms. Neither holds up: no code on the
+    // client computes a standard deviation at all (the 2.840/2.555 pair is PRESENTINT
+    // jitter_avg, a server-side mean absolute difference of consecutive Present intervals,
+    // from one disturbed session running 78.8 fps with a 1705 ms outlier), and 0.49 ms
+    // delta_avg appears nowhere in any capture - the lowest non-warmup value ever recorded
+    // is 1.34 ms. There is also no pre-read-ahead session log to compare against: READSIZE
+    // was added in the same commit as this buffer, so every log carrying CHAINEND also
+    // carries the new reader.
     read_buf: Vec<u8>,
     read_start: usize,
     read_end: usize,
 }
 
-// One read() of this size covers a whole frame at the bitrates in use (a 250 Mbps 90 Hz
-// stream is ~350 KB per frame), so the common case is one syscall per frame. Not larger: a
-// bigger buffer only adds latency when the stream is idle, and cannot reduce the count below
-// one per frame anyway.
+// Requested size per read(). This is an upper bound, not what the kernel hands back: measured
+// delivery is 51-61 KB regardless (see the note on MultiplexedTcpReader::read_buf). There is
+// no point raising it - the delivered chunk is set by automatic receive-window tuning, and
+// the buffer only costs a memcpy of whatever it did return.
 const TCP_READ_CHUNK: usize = 512 * 1024;
 
 impl MultiplexedTcpReader {
@@ -178,11 +193,11 @@ impl MultiplexedTcpReader {
 
             // DIAGNOSTIC: how much does one read() actually return?
             //
-            // The claim that the kernel hands over a 350 KB frame in several small pieces
-            // was an inference from thread wakeup counts, never measured. This records the
-            // real distribution so the question is settled by data: if nearly every read
-            // returns ~350 KB then one syscall per frame is already the norm and the jitter
-            // is elsewhere; if reads return tens of KB the kernel really is dribbling it out.
+            // This was added to settle an inference: that the kernel hands a ~350 KB frame
+            // over in several small pieces. Answer, from 11 sessions at 198-235 Mbps:
+            // average 51-61 KB per read, ~5 reads per frame, peak 512 KB reached only in a
+            // handful of samples. The inference was right, and the 512 KB request does not
+            // change it. Kept because it is the only direct measurement of this.
             if alvr_common::diagnostics_enabled() {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static RN: AtomicU64 = AtomicU64::new(0);
@@ -197,6 +212,15 @@ impl MultiplexedTcpReader {
                     AtomicU64::new(0),
                     AtomicU64::new(0),
                 ];
+                static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                    RN.store(0, Ordering::Relaxed);
+                    SUM.store(0, Ordering::Relaxed);
+                    MAX.store(0, Ordering::Relaxed);
+                    for slot in HIST.iter() {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                }
                 let n64 = n as u64;
                 let i = RN.fetch_add(1, Ordering::Relaxed) + 1;
                 SUM.fetch_add(n64, Ordering::Relaxed);

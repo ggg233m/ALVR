@@ -55,6 +55,50 @@ pub fn set_diagnostics_enabled(enabled: bool) {
     }
 }
 
+/// Generation counter for the diagnostic probes.
+///
+/// Every probe keeps its counters in block-local statics, which live as long as the
+/// process does. A long-lived process (the client, or the server across reconnects)
+/// therefore carries the previous streaming session's maxima into the next one, and a
+/// reported "size_max" or "gap_max" may belong to a session that ran with completely
+/// different settings. That happened in practice: a 922 KB RECVSIZE maximum was read as
+/// the current session's worst frame, when it came from an earlier session with a much
+/// larger VBV buffer.
+///
+/// Each process bumps this when a new streaming session starts; probes compare their own
+/// last-seen value and reset when it changes, so every reported maximum covers the
+/// current session only.
+pub static PROBE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[inline]
+pub fn probe_epoch() -> u64 {
+    PROBE_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Mark the start of a new streaming session. See [`PROBE_EPOCH`].
+pub fn bump_probe_epoch() -> u64 {
+    PROBE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// Returns true on the first probe call of a new streaming session.
+///
+/// Usage, inside the block that owns the counters:
+///
+///     static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+///     if alvr_common::new_probe_session(&SEEN_EPOCH) {
+///         N.store(0, Ordering::Relaxed);
+///         MAX_US.store(0, Ordering::Relaxed);
+///     }
+///
+/// `SEEN_EPOCH` is a freshly declared AtomicU64 used only for this purpose. Every
+/// counter it guards is zeroed once per session, on the first call after the epoch
+/// changed, so a reported maximum never spans two streaming sessions.
+#[inline]
+pub fn new_probe_session(seen: &std::sync::atomic::AtomicU64) -> bool {
+    let epoch = probe_epoch();
+    seen.swap(epoch, std::sync::atomic::Ordering::Relaxed) != epoch
+}
+
 pub const SERVER_IMPL_DBG_LABEL: &str = "SERVER IMPL";
 pub const CLIENT_IMPL_DBG_LABEL: &str = "CLIENT IMPL";
 pub const SERVER_CORE_DBG_LABEL: &str = "SERVER CORE";

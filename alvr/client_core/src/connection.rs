@@ -283,6 +283,12 @@ fn connection_pipeline(
 
     ctx.video_frame_metadata_queue.lock().clear();
 
+    // New streaming session: let every diagnostic probe zero its counters on its next
+    // call. They are block-local statics and live as long as the process, so without
+    // this a reported size_max/gap_max mixes this session with earlier ones that may
+    // have run with different settings.
+    alvr_common::bump_probe_epoch();
+
     let video_receive_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
         move || {
@@ -388,6 +394,19 @@ fn connection_pipeline(
                         AtomicU64::new(0),
                         AtomicU64::new(0),
                     ];
+                    static SEEN_EPOCH_0: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_0) {
+                        N.store(0, Ordering::Relaxed);
+                        SUM_US.store(0, Ordering::Relaxed);
+                        MAX_US.store(0, Ordering::Relaxed);
+                        MIN_US.store(u64::MAX, Ordering::Relaxed);
+                        SUM_SZ.store(0, Ordering::Relaxed);
+                        MAX_SZ.store(0, Ordering::Relaxed);
+                        OVER_BUDGET.store(0, Ordering::Relaxed);
+                        for slot in HR.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                    }
 
                     let now = {
                         use std::time::{SystemTime, UNIX_EPOCH};
@@ -452,6 +471,12 @@ fn connection_pipeline(
                     static SUM_SZ2: AtomicU64 = AtomicU64::new(0);
                     static MAX_SZ2: AtomicU64 = AtomicU64::new(0);
                     static SZN: AtomicU64 = AtomicU64::new(0);
+                    static SEEN_EPOCH_1: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_1) {
+                        SUM_SZ2.store(0, Ordering::Relaxed);
+                        MAX_SZ2.store(0, Ordering::Relaxed);
+                        SZN.store(0, Ordering::Relaxed);
+                    }
                     let sz = nal.len() as u64;
                     SUM_SZ2.fetch_add(sz, Ordering::Relaxed);
                     MAX_SZ2.fetch_max(sz, Ordering::Relaxed);
@@ -520,6 +545,27 @@ fn connection_pipeline(
                     static FIRST_US: AtomicU64 = AtomicU64::new(0);
                     static PKTS: AtomicU64 = AtomicU64::new(0);
                     static BYTES: AtomicU64 = AtomicU64::new(0);
+                    static SEEN_EPOCH_2: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH_2) {
+                        N.store(0, Ordering::Relaxed);
+                        SUM_SPAN_US.store(0, Ordering::Relaxed);
+                        MAX_SPAN_US.store(0, Ordering::Relaxed);
+                        SUM_PKTS.store(0, Ordering::Relaxed);
+                        MAX_PKTS.store(0, Ordering::Relaxed);
+                        SUM_BYTES.store(0, Ordering::Relaxed);
+                        MAX_BYTES.store(0, Ordering::Relaxed);
+                        LATE.store(0, Ordering::Relaxed);
+                        for slot in HS.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                        for slot in HL.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                        CUR_TS.store(0, Ordering::Relaxed);
+                        FIRST_US.store(0, Ordering::Relaxed);
+                        PKTS.store(0, Ordering::Relaxed);
+                        BYTES.store(0, Ordering::Relaxed);
+                    }
 
                     let now_us = {
                         use std::time::{SystemTime, UNIX_EPOCH};

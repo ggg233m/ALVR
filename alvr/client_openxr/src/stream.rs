@@ -429,6 +429,25 @@ impl StreamContext {
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ];
+            static SEEN_EPOCH_0: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH_0) {
+                N.store(0, Ordering::Relaxed);
+                SUM_P.store(0, Ordering::Relaxed);
+                MIN_P.store(u64::MAX, Ordering::Relaxed);
+                MAX_P.store(0, Ordering::Relaxed);
+                SUM_D.store(0, Ordering::Relaxed);
+                MAX_D.store(0, Ordering::Relaxed);
+                PREV_VSYNC.store(0, Ordering::Relaxed);
+                SUM_VG.store(0, Ordering::Relaxed);
+                MAX_VG.store(0, Ordering::Relaxed);
+                MIN_VG.store(u64::MAX, Ordering::Relaxed);
+                for slot in HP.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+                for slot in HV.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+            }
 
             let period_ns = frame_interval.as_nanos() as u64;
             let deadline_ns =
@@ -543,6 +562,18 @@ impl StreamContext {
             static PREV_DECODED: AtomicU64 = AtomicU64::new(u64::MAX);
             static MAX_GAP_US: AtomicU64 = AtomicU64::new(0);
             static EMPTY_RUN: AtomicU64 = AtomicU64::new(0);
+            static SEEN_EPOCH_1: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH_1) {
+                N.store(0, Ordering::Relaxed);
+                EMPTY.store(0, Ordering::Relaxed);
+                GOT.store(0, Ordering::Relaxed);
+                GAP1.store(0, Ordering::Relaxed);
+                GAP2.store(0, Ordering::Relaxed);
+                GAP3.store(0, Ordering::Relaxed);
+                PREV_DECODED.store(u64::MAX, Ordering::Relaxed);
+                MAX_GAP_US.store(0, Ordering::Relaxed);
+                EMPTY_RUN.store(0, Ordering::Relaxed);
+            }
 
             let n = N.fetch_add(1, Ordering::Relaxed) + 1;
             let period_ns = frame_interval.as_nanos().max(1) as u64;
@@ -619,6 +650,17 @@ impl StreamContext {
                     AtomicU64::new(0),
                     AtomicU64::new(0),
                 ];
+                static SEEN_EPOCH_2: AtomicU64 = AtomicU64::new(0);
+                if alvr_common::new_probe_session(&SEEN_EPOCH_2) {
+                    FN.store(0, Ordering::Relaxed);
+                    SUM_FETCH_US.store(0, Ordering::Relaxed);
+                    MAX_FETCH_US.store(0, Ordering::Relaxed);
+                    SUM_POLLS.store(0, Ordering::Relaxed);
+                    MAX_POLLS.store(0, Ordering::Relaxed);
+                    for slot in HF.iter() {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                }
                 let fi = FN.fetch_add(1, Ordering::Relaxed) + 1;
                 SUM_FETCH_US.fetch_add(fetch_us, Ordering::Relaxed);
                 MAX_FETCH_US.fetch_max(fetch_us, Ordering::Relaxed);
@@ -726,6 +768,20 @@ impl StreamContext {
                 AtomicU64::new(0),
                 AtomicU64::new(0),
             ];
+            static SEEN_EPOCH_3: AtomicU64 = AtomicU64::new(0);
+            if alvr_common::new_probe_session(&SEEN_EPOCH_3) {
+                N.store(0, Ordering::Relaxed);
+                SUM.store(0, Ordering::Relaxed);
+                MIN.store(u64::MAX, Ordering::Relaxed);
+                MAX.store(0, Ordering::Relaxed);
+                PREV.store(u64::MAX, Ordering::Relaxed);
+                SUM_D.store(0, Ordering::Relaxed);
+                MAX_D.store(0, Ordering::Relaxed);
+                NULLF.store(0, Ordering::Relaxed);
+                for slot in H.iter() {
+                    slot.store(0, Ordering::Relaxed);
+                }
+            }
 
             // signed: positive = content is ahead of the display instant
             let diff_ns = timestamp.as_nanos() as i64 - vsync_time.as_nanos() as i64;

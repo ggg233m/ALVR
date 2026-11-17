@@ -184,6 +184,18 @@ impl TrackingManager {
                         AtomicU64::new(0),
                     ];
                     static DVHIST_OVER: AtomicU64 = AtomicU64::new(0);
+                    static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+                    if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                        N.store(0, Ordering::Relaxed);
+                        SUM_V.store(0, Ordering::Relaxed);
+                        SUM_V2.store(0, Ordering::Relaxed);
+                        SUM_DV.store(0, Ordering::Relaxed);
+                        MAX_DV.store(0, Ordering::Relaxed);
+                        for slot in DVHIST.iter() {
+                            slot.store(0, Ordering::Relaxed);
+                        }
+                        DVHIST_OVER.store(0, Ordering::Relaxed);
+                    }
 
                     let v = motion.linear_velocity;
                     let speed = v.length();
@@ -318,6 +330,13 @@ impl TrackingManager {
                         static SUM: AtomicU64 = AtomicU64::new(0);
                         static MAX: AtomicU64 = AtomicU64::new(0);
                         static MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+                        static SEEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+                        if alvr_common::new_probe_session(&SEEN_EPOCH) {
+                            N.store(0, Ordering::Relaxed);
+                            SUM.store(0, Ordering::Relaxed);
+                            MAX.store(0, Ordering::Relaxed);
+                            MIN.store(u64::MAX, Ordering::Relaxed);
+                        }
                         let us = best_timestamp_diff.as_micros() as u64;
                         let n = N.fetch_add(1, Ordering::Relaxed) + 1;
                         SUM.fetch_add(us, Ordering::Relaxed);
