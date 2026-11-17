@@ -184,6 +184,14 @@ pub fn compute_restart_settings_hash(
     enc.encoding_gamma.map(f32::to_bits).hash(&mut h);
     enc.software.force_software_encoding.hash(&mut h);
     enc.software.thread_count.hash(&mut h);
+    // Intel oneVPL encoder. These were missing entirely, so changing Target usage or
+    // Low-power only took effect after a manual SteamVR restart despite the UI showing
+    // the restart warning.
+    (enc.vpl.target_usage as u32).hash(&mut h);
+    enc.vpl.low_power.hash(&mut h);
+    enc.vpl.vbv_frames.hash(&mut h);
+    enc.vpl.gop_frames.hash(&mut h);
+    enc.vpl.idr_frame_interval_ms.hash(&mut h);
     // HDR
     hdr.enable.hash(&mut h);
     hdr.force_hdr_srgb_correction.hash(&mut h);

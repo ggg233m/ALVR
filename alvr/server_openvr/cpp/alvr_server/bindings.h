@@ -146,6 +146,12 @@ struct Settings {
 
     unsigned int m_vplTargetUsage;
     bool m_vplLowPower;
+    // Frames' worth of bits the VBV may hold. 0 keeps the historical fixed 8 MB
+    // buffer; 1..8 is sized from the target bitrate and the refresh rate.
+    unsigned int m_vplVbvFrames;
+    // Encoder GOP length in frames. 0 = no encoder-scheduled keyframes; the server
+    // forces them on the "IDR frame interval" cadence instead.
+    unsigned int m_vplGopFrames;
 
     unsigned int m_nvencTuningPreset;
     unsigned int m_nvencMultiPass;

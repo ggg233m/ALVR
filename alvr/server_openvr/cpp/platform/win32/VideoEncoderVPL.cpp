@@ -55,18 +55,40 @@ struct VplBrcParams {
     mfxU16 initialDelayInKB;
 };
 
-VplBrcParams MakeVplBrcParams(uint64_t bitrate_bps) {
+VplBrcParams MakeVplBrcParams(uint64_t bitrate_bps, unsigned int vbv_frames, int refresh_rate) {
     const uint64_t kbps = (std::max)(uint64_t(1), (bitrate_bps + 999) / 1000);
     uint64_t mult = (kbps + VPL_MAX_TARGET_KBPS - 1) / VPL_MAX_TARGET_KBPS;
     if (mult < 1) mult = 1;
     if (mult > 65535) mult = 65535;
     const uint64_t tgt = (std::min)(VPL_MAX_TARGET_KBPS, (kbps + mult - 1) / mult);
 
-    // Keep BufferSizeInKB * mult * 1000 small enough for the existing bitstream
-    // (width*height*8) and small enough that BRC actually spends the budget.
-    // 8192 KB / mult was measured to hit the exact target peak rate.
-    const uint64_t buf = (mult > 1) ? (std::max)(uint64_t(256), 8192 / mult) : 0;
+    uint64_t buf = 0;
+    if (vbv_frames > 0) {
+        // Size the VBV from the frame budget instead of a fixed byte count:
+        //   bytes per frame = bitrate / fps / 8
+        // BufferSizeInKB is scaled by BRCParamMultiplier, so the value written
+        // here must be the unscaled one.
+        //
+        // Every other backend already does this (NVENC and AMF use 1.1 frames,
+        // FFmpeg/VAAPI the same), so this path only needs the knob to match them.
+        const uint64_t fps = uint64_t(refresh_rate > 0 ? refresh_rate : 90);
+        const uint64_t frame_bits = bitrate_bps / fps;
+        const uint64_t buf_kb = frame_bits * uint64_t(vbv_frames) / 8 / 1000;
+        buf = (std::max)(uint64_t(1), buf_kb / mult);
+        // BufferSizeInKB is mfxU16; clamp before the cast rather than after.
+        buf = (std::min)(buf, uint64_t(65535));
+    } else if (mult > 1) {
+        // Historical behaviour: a fixed 8 MB buffer, independent of bitrate.
+        // Keep BufferSizeInKB * mult * 1000 small enough for the existing
+        // bitstream (width*height*8) and small enough that BRC actually spends
+        // the budget. 8192 KB / mult was measured to hit the exact target peak
+        // rate, but it is ~25 frames at 230 Mbps.
+        buf = (std::max)(uint64_t(256), 8192 / mult);
+    }
 
+    // InitialDelay is the VBV fill level assumed at the first frame. Half the
+    // buffer is the conventional choice and stops the first frames from being
+    // starved.
     return { static_cast<mfxU16>(mult), static_cast<mfxU16>(tgt),
              static_cast<mfxU16>(buf), static_cast<mfxU16>(buf / 2) };
 }
@@ -180,23 +202,26 @@ void VideoEncoderVPL::Transmit(
         }
     }
 
-    // Periodic keyframe enforcement.
+    // Optional server-side keyframe cadence ("IDR frame interval", default 0 = off).
     //
-    // This exists because of AV1 specifically: the Arc driver accepts
-    // mfx.GopPicSize but does not honour it for AV1 (with GopPicSize=300 the
-    // measured IDR spacing was 8189 frames, ~91 s, i.e. the driver default), so
-    // after any packet loss the decoder never resynchronises and the image stays
-    // corrupted. Enforcing the cadence here works around that.
+    // Normally unnecessary: the client requests a keyframe through IDRScheduler when the
+    // decoder refuses a frame, or when a packet was lost (UDP only - the TCP receive path
+    // never reports loss). Other backends rely on exactly that, with an infinite GOP.
     //
-    // It does NOT apply to HEVC. The driver honours GopPicSize for HEVC (the
-    // effective params report gopPicSize=300 and the stream carries keyframes at
-    // that cadence), so forcing extra IDRs only costs time and bitrate. Forcing
-    // one per second at 90 Hz measured 16.2 ms per IDR frame against a 9.19 ms P
-    // frame and an 11.11 ms budget, i.e. every forced keyframe dropped a frame -
-    // which is exactly the periodic spike visible on the framerate graph.
+    // It exists for one case: the encoder was given a GOP it does not execute. That was
+    // observed with GopPicSize = 0, which this driver rewrites to 248 and then ignores
+    // (measured spacing 44 s, then 30 s, instead of the declared 2.8 s). With a value the
+    // driver accepts the cadence is exact - GopPicSize = 900 produced eleven consecutive
+    // 900-frame gaps at 10.0 s each on AV1 - so the workaround is only needed when
+    // gop_frames = 0.
     //
-    // The interval comes from Settings -> Video -> "IDR frame interval" and
-    // doubles as the maximum time the image can stay corrupted. 0 disables it.
+    // Kept AV1-only on purpose: HEVC has always honoured GopPicSize here, and a forced
+    // IDR costs 16.2 ms against an 11.11 ms budget, i.e. every forced keyframe drops a
+    // frame.
+    //
+    // Deliberately NOT tied to gop_frames: coupling them meant gop_frames = 0 silently
+    // installed a 1000 ms (90-frame) cadence, three times denser than the 300-frame
+    // default it was meant to relax.
     const bool needsForcedKeyframes = (m_codec == ALVR_CODEC_AV1);
     if (needsForcedKeyframes) {
         static std::chrono::steady_clock::time_point lastForcedIdr
@@ -288,58 +313,18 @@ void VideoEncoderVPL::Transmit(
                         {
                             static int outFrames = 0;
                             outFrames++;
-                            // Log every keyframe unconditionally: a sampled log
-                            // cannot show whether periodic IDRs are actually
-                            // produced, which is exactly what hid the black
-                            // screen for several rounds.
-                            // TEMPORARY DIAGNOSTIC: inspect the real NAL type in the
-                            // bitstream so driver-emitted keyframes can be told apart
-                            // from the ones we force. HEVC NAL header: type = (b0 >> 1) & 0x3F;
-                            // 19 = IDR_W_RADL, 20 = IDR_N_LP, 21 = CRA (all random-access).
-                            // Only computed when diagnostics are on: the scan below walks the
-                            // whole access unit (up to ~1 MB), which is not worth doing per frame
-                            // in normal operation.
+                            // Random-access flag from the encoder's own frame type, not
+                            // from the bitstream. mfxFrameType bits: 0x01 I, 0x02 P, 0x04 B,
+                            // 0x40 REF, 0x80 IDR, so 0x42 = P|REF and 0xC1 = I|REF|IDR.
+                            //
+                            // This replaced a HEVC NAL-header scan that ran for every codec.
+                            // AV1 has OBUs, not NAL start codes, so the scan matched 19/20/21
+                            // by chance: 157 of 222 frames in a 75 s AV1 session were reported
+                            // as keyframes while being P|REF, and the resulting 2.08 "keyframes
+                            // per second" sent an investigation after the wrong signal.
                             int realKey = 0;
                             if (DiagEnabled()) {
-                                const unsigned char* p
-                                    = m_vplBitstream.Data + m_vplBitstream.DataOffset;
-                                unsigned len = m_vplBitstream.DataLength;
-                                // Scan EVERY NAL of this access unit, not just the first.
-                                //
-                                // The previous version broke out of the loop after the first
-                                // start code, which made realKey permanently 0: an IDR access
-                                // unit begins with AUD (35), then VPS (32) / SPS (33) / PPS (34)
-                                // / prefix SEI (39), and only then the IDR slice (19/20/21).
-                                // Reading the first NAL therefore always saw a non-random-access
-                                // type, so every IDR was reported as realkey=0 and an entire
-                                // investigation concluded "the driver never emits keyframes".
-                                //
-                                // NAL header for HEVC: forbidden_zero_bit(1) | type(6) | layer(6)
-                                // | tid(3), so type = (b0 >> 1) & 0x3F.
-                                for (unsigned i = 0; i + 3 < len; i++) {
-                                    if (p[i] != 0 || p[i + 1] != 0) {
-                                        continue;
-                                    }
-                                    unsigned hdr;
-                                    if (p[i + 2] == 1) {
-                                        hdr = i + 3;
-                                    } else if (p[i + 2] == 0 && p[i + 3] == 1) {
-                                        hdr = i + 4;
-                                    } else {
-                                        continue;
-                                    }
-                                    if (hdr >= len) {
-                                        break;
-                                    }
-                                    const int t = (p[hdr] >> 1) & 0x3F;
-                                    if (t == 19 || t == 20 || t == 21) {
-                                        realKey = 1;
-                                        break;
-                                    }
-                                    // Skip past the 2-byte NAL header so the next iteration
-                                    // looks for the following start code.
-                                    i = hdr + 1;
-                                }
+                                realKey = (m_vplBitstream.FrameType & MFX_FRAMETYPE_IDR) ? 1 : 0;
                             }
                             if (DiagEnabled()
                                 && (outFrames <= 5 || outFrames % 120 == 0 || realKey
@@ -784,40 +769,34 @@ void VideoEncoderVPL::InitVplEncode() {
     //
     // Conclusion: this decoder does not gain from multiple slices, and the extra slice
     // boundaries cost more than the parallelism buys. Leave NumSlice unset.
-    // Do NOT set GopPicSize to 0xFFFF. That was tried and it breaks recovery:
-    // the client only asks for an IDR *after* it has constructed its decoder
-    // (set_decoder_input_callback -> RequestIdr), which happens a few hundred
-    // milliseconds after the first IDR has already been sent and dropped. With
-    // no periodic keyframes the client then never gets another one and the
-    // headset stays black for the whole session.
+
+    // IdrInterval = 1 makes every keyframe a true IDR. The client only resynchronises on
+    // an IDR; with 0 the driver emits CRA frames after the first keyframe. The meaning is
+    // per-codec per the oneVPL docs (H.264: 1 = every other I-frame is an IDR, HEVC:
+    // 1 = every I-frame is an IDR).
     //
-    // A periodic keyframe is required so the client can resynchronise, but the
-    // cadence comes from GopPicSize alone. IdrInterval must stay 0 for HEVC.
+    // GopPicSize is a setting (gop_frames). 0 is the documented "unspecified" value,
+    // which this driver resolves to its own default (measured: 248 on AV1, then not
+    // executed). Any positive value is honoured exactly - 900 gave eleven consecutive
+    // 10.0 s gaps. Do not use 0xFFFF: not a documented value, and it makes
+    // MFXVideoENCODE_Query return MFX_WRN_INCOMPATIBLE_VIDEO_PARAM.
     //
-    // Per the oneVPL docs the meaning of IdrInterval differs per codec:
-    //   H.264: 0 = every I-frame is an IDR, 1 = every other I-frame is an IDR
-    //   HEVC:  0 = only the first I-frame is an IDR, 1 = EVERY I-frame is an IDR
-    // So the old value of 1 turned every keyframe into an IDR on HEVC. Measured
-    // consequence at 90 Hz / CBR 300 Mbps: mean frame size 377 KB -> 736 KB,
-    // delivered bitrate 453 Mbps against a 300 Mbps target, client reporting
-    // "Decoder saturation" and "Network dropped video packet", each drop
-    // triggering another RequestIDR - a feedback loop that showed up as
-    // stuttering and blocky artefacts.
-    // IdrInterval stays 1 so every keyframe is a true IDR: the client only
-    // resynchronises on an IDR, and with 0 the driver would emit CRA frames for
-    // everything after the first keyframe.
+    // Recovery does not depend on the GOP. A requested keyframe is produced correctly by
+    // the "I | IDR | REF" mask below; passing MFX_FRAMETYPE_IDR alone was accepted
+    // without error but silently produced a P frame.
     //
-    // The size problem is NOT the IDR bit itself - it is that keyframes were
-    // being emitted far more often than GopPicSize asks for. See the
-    // RequestIDR feedback loop handled in Transmit().
-    m_vplEncodeParams.mfx.GopPicSize = 300;
+    // Other backends never schedule keyframes at all (NVENC infinite GOP, AMF GOP 0,
+    // VAAPI gop_size = INT_MAX), so a periodic keyframe is an Intel-only cost.
+    m_vplEncodeParams.mfx.GopPicSize
+        = m_vplGopFrames > 0 ? mfxU16((std::min)(m_vplGopFrames, 65535u)) : 0;
     m_vplEncodeParams.mfx.IdrInterval = 1;
 
     auto dynParams = GetDynamicEncoderParams();
     const uint64_t initialBitrateBps = (dynParams.updated && dynParams.bitrate_bps > 0)
         ? dynParams.bitrate_bps
         : 30'000'000ULL;
-    const VplBrcParams brc = MakeVplBrcParams(initialBitrateBps);
+    const VplBrcParams brc
+        = MakeVplBrcParams(initialBitrateBps, m_vplVbvFrames, m_refreshRate);
     m_vplEncodeParams.mfx.BRCParamMultiplier = brc.multiplier;
     m_vplEncodeParams.mfx.TargetKbps = brc.targetKbps;
     // MaxKbps is "the maximum bitrate at which the encoded data enters the VBV
@@ -907,6 +886,8 @@ void VideoEncoderVPL::ChooseParams() {
 
     m_refreshRate = s->m_refreshRate;
     m_codec = s->m_codec;
+    m_vplVbvFrames = s->m_vplVbvFrames;
+    m_vplGopFrames = s->m_vplGopFrames;
 
     // h264 encoding is currently broken due to an encoding
     // error when forcing the idr frame type:
@@ -1213,14 +1194,23 @@ void VideoEncoderVPL::LogEffectiveParams(mfxStatus query_status, const mfxVideoP
 
     // BRC fields: the driver is free to rewrite these in Query(), and if it
     // caps or rescales them the requested bitrate is silently not applied.
+    // The buffer is reported both in MB and in frames, because "frames" is the
+    // number that matters for frame-size regularity and it is the one the other
+    // backends size directly (NVENC/AMF/FFmpeg all use ~1.1).
+    const double eff_bitrate_bps
+        = double(actual.mfx.TargetKbps) * double(actual.mfx.BRCParamMultiplier) * 1000.0;
+    const double eff_buffer_bytes
+        = double(actual.mfx.BufferSizeInKB) * double(actual.mfx.BRCParamMultiplier) * 1000.0;
+    const double frame_bits
+        = m_refreshRate > 0 ? eff_bitrate_bps / double(m_refreshRate) : eff_bitrate_bps / 90.0;
     VPL_WARN(
         "EFFECTIVE BRC: TargetKbps=%u MaxKbps=%u BufferSizeInKB=%u InitialDelayInKB=%u "
-        "mult=%u => %.1f Mbps, buffer %.1f MB",
+        "mult=%u => %.1f Mbps, buffer %.1f MB = %.1f frames",
         unsigned(actual.mfx.TargetKbps), unsigned(actual.mfx.MaxKbps),
         unsigned(actual.mfx.BufferSizeInKB), unsigned(actual.mfx.InitialDelayInKB),
-        unsigned(actual.mfx.BRCParamMultiplier),
-        double(actual.mfx.TargetKbps) * double(actual.mfx.BRCParamMultiplier) / 1000.0,
-        double(actual.mfx.BufferSizeInKB) * double(actual.mfx.BRCParamMultiplier) / 1024.0
+        unsigned(actual.mfx.BRCParamMultiplier), eff_bitrate_bps / 1e6,
+        eff_buffer_bytes / (1024.0 * 1024.0),
+        frame_bits > 0.0 ? eff_buffer_bytes * 8.0 / frame_bits : 0.0
     );
 
     if (actual.mfx.FrameInfo.ChromaFormat == MFX_CHROMAFORMAT_YUV444

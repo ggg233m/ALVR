@@ -347,6 +347,60 @@ On an Arc A770 (DG2), which only ships the low-power (VDEnc) encoder, the driver
     #[schema(flag = "steamvr-restart")]
     pub low_power: bool,
 
+    #[schema(strings(
+        display_name = "VBV buffer size",
+        help = r"How many frames' worth of bits the rate controller may spend in a single frame.
+
+The VBV buffer is the encoder's output-side byte budget. A large buffer lets one frame consume many frames' worth of bits, so encoded frame sizes become uneven - at 8 MB on this build a keyframe measured 2.7x the average frame. Each oversized frame takes proportionally longer to transmit than the average, so the arrival pattern downstream inherits that unevenness.
+
+Measured on an Arc A770 at 230 Mbps: 25 frames gives keyframes up to 834 KB (2.7 frame budgets); 2 frames gives 438 KB (1.4 budgets). Capping frame size cut the client's queue-drop counter from 70 to 30, but did NOT change frame arrival regularity (the share of frames arriving later than one frame period stayed at 50.25% against 50.56%). Do not expect this to fix stutter on its own.
+
+The default of 1 frame matches what the other backends compute for themselves (NVENC, AMF and the Linux/FFmpeg paths all size the buffer at about 1.1 frames), so the Intel path no longer behaves differently from them by default.
+
+0 is kept as an escape hatch: it restores the old fixed 8 MB buffer, about 25 frames at 230 Mbps. That value existed because this driver under-delivers the requested bitrate with a small buffer at low bitrates; 230 Mbps was verified to still be reached at 2 frames, but the low-bitrate case was not re-tested. Use 0 if a low-bitrate configuration visibly loses quality or the delivered rate falls short.
+
+The driver does not necessarily honour small values: on this hardware it clamps BufferSizeInKB to a floor of about 2 frames. Both 1.0 and 1.1 frame requests were reported back as 2.02 frames, and the initial delay was left at the requested value, so the buffer ends up larger than asked for. Only values above that floor are taken literally. The effective figure is in the log line 'EFFECTIVE BRC ... buffer X MB = Y frames'."
+    ))]
+    #[schema(gui(slider(min = 0, max = 8)))]
+    #[schema(flag = "steamvr-restart")]
+    pub vbv_frames: u32,
+
+    #[schema(strings(
+        display_name = "GOP length",
+        help = r"Frames between encoder-scheduled keyframes. 300 is the historical value; 0 passes 0 to the encoder, which the oneVPL documentation defines as 'GOP size unspecified'.
+
+A keyframe carries about 2.7 frame budgets of bits at 230 Mbps (834 KB against a 312 KB budget), so every keyframe occupies roughly 2.7 frame periods on the wire instead of one. At 300 frames / 90 Hz that happens every 3.4 seconds, and it is a periodic source of oversized frames. Raising this value makes those spikes rarer at the cost of slower recovery from a lost packet.
+
+The other backends never schedule keyframes themselves (NVENC uses an infinite GOP, AMF sets the GOP to 0, VAAPI uses g_size = INT_MAX); they recover only through the client's IDR request. 0 makes this backend behave that way and does nothing else - it is not replaced by a periodic cadence.
+
+An earlier build of this option passed 65535 instead of 0. That value is not documented by oneVPL and the driver had to sanitise the request, logging 'incompatible video params, auto-correcting'. 0 is the documented form and needs no correction.
+
+0 is not yet verified end to end on this hardware. It relies on the client's IDR request being honoured, which required fixing the encoder's frame type first (an IDR-only mask used to be accepted and then silently produce a normal P frame). The default stays 300 so nothing changes unless 0 is chosen deliberately. If 0 ever leaves the headset black, use a large finite value such as 900 instead.
+
+The server-side forced cadence (the 'IDR frame interval' setting) is unrelated: it exists because this driver ignores the GOP size for AV1 specifically, and it is only active on AV1.
+
+Values are frames, not seconds. At 90 Hz, 300 frames is 3.3 s and 900 frames is 10 s."
+    ))]
+    #[schema(gui(slider(min = 0, max = 900, step = 30)))]
+    #[schema(flag = "steamvr-restart")]
+    pub gop_frames: u32,
+
+    #[schema(strings(
+        display_name = "IDR frame interval",
+        help = r"Interval for a server-side forced keyframe, used as a fallback cadence when the encoder's own GOP cannot be relied on. 0 disables it, which is the default.
+
+This exists because of one driver defect: on this hardware the Arc driver accepts GopPicSize for AV1 but does not honour it. Measured with GopPicSize = 248 (2.8 s at 90 Hz), the actual IDR spacing was 44 s and then 30 s. HEVC does honour GopPicSize, so on HEVC this setting only adds keyframes that the encoder would already have produced.
+
+It is NOT the main recovery mechanism. A keyframe is normally requested by the client, through IDRScheduler, which is rate limited to 'Minimum IDR interval' (100 ms). The client requests one in two cases: when the decoder refuses a frame (always possible), and when a packet was lost (UDP only - on TCP the receive path never reports loss, so that trigger cannot fire). It also requests one while discarding a corrupted stream, but only when 'Avoid video glitching' is on.
+
+So the honest description is: the client already asks for a keyframe when it needs one. Turning this on adds a periodic keyframe the client did not ask for. That bounds how long a corrupted image can persist if the client's request never arrives, at the cost of a large frame every interval - a keyframe is roughly 2.7 frame budgets of bits, so at 1000 ms it costs about one frame period per second.
+
+The value is milliseconds, not frames."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    #[schema(gui(slider(min = 0, max = 5000, step = 100)), suffix = "ms")]
+    pub idr_frame_interval_ms: u64,
+
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -775,16 +829,6 @@ If you want to reduce the amount of pixelation on the edges, increase the center
         help = "Attempts to use a software decoder on the device. Slow, but may work around broken codecs."
     ))]
     pub force_software_decoder: bool,
-
-    #[schema(strings(
-        display_name = "IDR frame interval",
-        help = r"Maximum time the image can stay corrupted after a lost packet, because a decoder can only resynchronise on an IDR frame.
-On Intel ARC the driver ignores the encoder's GOP size for AV1, so this cadence is enforced by the server rather than the encoder.
-Shorter values recover faster but cost bitrate; 0 disables the periodic keyframes."
-    ))]
-    #[schema(flag = "steamvr-restart")]
-    #[schema(gui(slider(min = 0, max = 5000, step = 100)), suffix = "ms")]
-    pub idr_frame_interval_ms: u64,
 
     pub mediacodec_extra_options: Vec<(String, MediacodecProperty)>,
 
@@ -1904,6 +1948,9 @@ pub fn session_settings_default() -> SettingsDefault {
                         variant: VplTargetUsageDefaultVariant::Balanced,
                     },
                     low_power: false,
+                    vbv_frames: 1,
+                    gop_frames: 300,
+                    idr_frame_interval_ms: 0,
                 },
                 software: SoftwareEncodingConfigDefault {
                     gui_collapsed: true,
@@ -1976,7 +2023,6 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             force_software_decoder: false,
-            idr_frame_interval_ms: 1000,
             color_correction: SwitchDefault {
                 enabled: false,
                 content: ColorCorrectionConfigDefault {

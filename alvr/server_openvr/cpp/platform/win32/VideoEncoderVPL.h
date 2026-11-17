@@ -75,6 +75,11 @@ private:
     mfxU32 m_vplQualityPreset;
     mfxU32 m_vplRateControlMode;
     mfxU16 m_vplLowPower;
+    // VBV size in frames, from settings. 0 = legacy fixed 8 MB buffer.
+    unsigned int m_vplVbvFrames = 0;
+    // Encoder GOP length in frames. 0 = the encoder does not schedule keyframes;
+    // Transmit() then forces them on the "IDR frame interval" cadence instead.
+    unsigned int m_vplGopFrames = 300;
     DXGI_FORMAT m_dxColorFormat;
     mfxVideoParam m_vplEncodeParams = {};
 
