@@ -172,6 +172,9 @@ impl SettingsTab {
                         .num_columns(2)
                         .min_col_width(MIN_COLUMN_SIZE)
                         .show(ui, |ui| {
+                            path_value_pairs.extend(self.quest3_intel_preset.ui(ui));
+                            ui.end_row();
+
                             path_value_pairs.extend(self.resolution_preset.ui(ui));
                             ui.end_row();
 
@@ -209,8 +212,6 @@ impl SettingsTab {
 
                             path_value_pairs.extend(self.eye_face_tracking_preset.ui(ui));
                             ui.end_row();
-
-                            path_value_pairs.extend(self.quest3_intel_preset.ui(ui));
                             ui.end_row();
                         })
                 });
